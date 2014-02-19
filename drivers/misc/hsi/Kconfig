@@ -1,0 +1,10 @@
+#
+# sechsi device driver
+#
+
+config SAMSUNG_HSI
+	bool "MIPI-HSI Support"
+	depends on CPU_EXYNOS4212 || CPU_EXYNOS4412 || CPU_EXYNOS5250
+	default n
+	help
+	   When this option is turned on, mipi-hsi support packages will be installed.

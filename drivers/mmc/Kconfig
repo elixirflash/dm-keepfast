@@ -1,0 +1,59 @@
+#
+# MMC subsystem configuration
+#
+
+menuconfig MMC
+	tristate "MMC/SD/SDIO card support"
+	depends on HAS_IOMEM
+	help
+	  This selects MultiMediaCard, Secure Digital and Secure
+	  Digital I/O support.
+
+	  If you want MMC/SD/SDIO support, you should say Y here and
+	  also to your specific host controller driver.
+
+config MMC_DEBUG
+	bool "MMC debugging"
+	depends on MMC != n
+	help
+	  This is an option for use by developers; most people should
+	  say N here.  This enables MMC core and driver debugging.
+
+config MMC_4_5_FEATURE_SUPPORT
+	bool "MMC 4.5 features config"
+	depends on MMC != n
+	help
+	  If you want MMC discard support, you should say Y here
+
+config MMC_PACKED_COMMANDS
+	bool "Enable packed commands"
+	depends on MMC_4_5_FEATURE_SUPPORT != n
+	help
+	  If you want MMC packed commands support, you should say Y here
+	  
+config MMC_CACHE_CONTROL
+	bool "Enable cache control"
+	depends on MMC_4_5_FEATURE_SUPPORT != n
+	help
+	  If you want MMC cache control support, you should say Y here
+	  
+config MMC_POWEROFF_NOTIFY
+	bool "Enable power off notify"
+	depends on MMC_4_5_FEATURE_SUPPORT != n
+	help
+	  If you want MMC power off notify support, you should say Y here  
+	  
+config MMC_POLLING_WAIT_CMD23
+	bool "Wait for cmd23's done interrupt by polling check (EXPERIMENTAL)"
+	depends on MMC != n
+	help
+	  If you say Y here, cmd23 dose not use interrupt.
+if MMC
+
+source "drivers/mmc/core/Kconfig"
+
+source "drivers/mmc/card/Kconfig"
+
+source "drivers/mmc/host/Kconfig"
+
+endif # MMC
