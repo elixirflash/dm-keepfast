@@ -195,7 +195,7 @@ export KBUILD_BUILDHOST := $(SUBARCH)
 #ARCH		?= $(SUBARCH)
 #CROSS_COMPILE	?= $(CONFIG_CROSS_COMPILE:"%"=%)
 ARCH            = arm
-CROSS_COMPILE   = /home/joys/work/microvision-devboard/SRC/Android/Q3-compiler-64Bit/arm-2009q3/bin/arm-none-linux-gnueabi-
+CROSS_COMPILE   = /opt/arm-2009q3/bin/arm-none-linux-gnueabi-
 
 # Architecture as present in compile.h
 UTS_MACHINE 	:= $(ARCH)
