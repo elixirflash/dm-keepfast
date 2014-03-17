@@ -12,11 +12,20 @@
 #include <linux/f2fs_fs.h>
 #include <linux/buffer_head.h>
 #include <linux/writeback.h>
+#include <linux/jbd.h>
 
 #include "f2fs.h"
 #include "node.h"
 
 #include <trace/events/f2fs.h>
+
+int f2fs_get_context(struct page *page)
+{
+	if (page && page->mapping) 
+                return page->mapping->a_ops->get_context(page);
+         else
+                return 0;
+}
 
 void f2fs_set_inode_flags(struct inode *inode)
 {

@@ -1592,6 +1592,22 @@ static int do_journal_get_write_access(handle_t *handle,
 	return ret;
 }
 
+static int ext4_get_context(struct page *page)
+{
+	if (page && page->mapping && page->mapping->host) {
+		
+		return page->mapping->host->i_ino;
+	}
+	else
+		return 0;
+}
+
+static int ext4_set_buffer_context(handle_t *handle, struct buffer_head *bh)
+{
+	bh->b_context = ext4_get_context(bh->b_page);
+	return 0;
+}
+
 /*
  * Truncate blocks that were not used by write. We have to truncate the
  * pagecache as well so that corresponding buffers get properly unmapped.
@@ -1655,6 +1671,13 @@ retry:
 				from, to, NULL, do_journal_get_write_access);
 	}
 
+	if (page_has_buffers(page)) {
+		if (!ret && walk_page_buffers(NULL, page_buffers(page),
+                                              from, to, NULL, ext4_set_buffer_context)) {
+	 		ext4_warning(inode->i_sb, "Couldn't set context\n");
+		}
+	}        
+        
 	if (ret) {
 		unlock_page(page);
 		page_cache_release(page);
@@ -3122,8 +3145,12 @@ static int ext4_da_write_begin(struct file *file, struct address_space *mapping,
 	pgoff_t index;
 	struct inode *inode = mapping->host;
 	handle_t *handle;
+	unsigned from, to;        
 
 	index = pos >> PAGE_CACHE_SHIFT;
+
+	from = pos & (PAGE_CACHE_SIZE - 1);
+	to = from + len;        
 
 	if (ext4_nonda_switch(inode->i_sb)) {
 		*fsdata = (void *)FALL_BACK_TO_NONDELALLOC;
@@ -3172,6 +3199,14 @@ retry:
 
 	if (ret == -ENOSPC && ext4_should_retry_alloc(inode->i_sb, &retries))
 		goto retry;
+
+	if (page_has_buffers(page)) {
+		if (walk_page_buffers(NULL, page_buffers(page),
+		               from, to, NULL, ext4_set_buffer_context)) {
+			ext4_warning(inode->i_sb, "Couldn't set context\n");
+		}
+	}
+        
 out:
 	return ret;
 }
@@ -3870,6 +3905,7 @@ static const struct address_space_operations ext4_ordered_aops = {
 	.migratepage		= buffer_migrate_page,
 	.is_partially_uptodate  = block_is_partially_uptodate,
 	.error_remove_page	= generic_error_remove_page,
+	.get_context            = ext4_get_context        
 };
 
 static const struct address_space_operations ext4_writeback_aops = {
@@ -3885,6 +3921,7 @@ static const struct address_space_operations ext4_writeback_aops = {
 	.migratepage		= buffer_migrate_page,
 	.is_partially_uptodate  = block_is_partially_uptodate,
 	.error_remove_page	= generic_error_remove_page,
+	.get_context            = ext4_get_context        
 };
 
 static const struct address_space_operations ext4_journalled_aops = {
@@ -3899,6 +3936,7 @@ static const struct address_space_operations ext4_journalled_aops = {
 	.releasepage		= ext4_releasepage,
 	.is_partially_uptodate  = block_is_partially_uptodate,
 	.error_remove_page	= generic_error_remove_page,
+	.get_context            = ext4_get_context        
 };
 
 static const struct address_space_operations ext4_da_aops = {
@@ -3915,6 +3953,7 @@ static const struct address_space_operations ext4_da_aops = {
 	.migratepage		= buffer_migrate_page,
 	.is_partially_uptodate  = block_is_partially_uptodate,
 	.error_remove_page	= generic_error_remove_page,
+	.get_context            = ext4_get_context        
 };
 
 void ext4_set_aops(struct inode *inode)

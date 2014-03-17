@@ -366,6 +366,8 @@ static void dio_bio_submit(struct dio *dio)
 	dio->refcount++;
 	spin_unlock_irqrestore(&dio->bio_lock, flags);
 
+        bio->bi_context = dio->inode->i_ino;
+
 	if (dio->is_async && dio->rw == READ)
 		bio_set_pages_dirty(bio);
 

@@ -384,7 +384,7 @@ int f2fs_readpage(struct f2fs_sb_info *sbi, struct page *page,
 	down_read(&sbi->bio_sem);
 
 	/* Allocate a new bio */
-	bio = f2fs_bio_alloc(bdev, 1);
+	bio = f2fs_bio_alloc(bdev, 1, page);
 
 	/* Initialize the bio */
 	bio->bi_sector = SECTOR_FROM_BLOCK(sbi, blk_addr);
@@ -772,6 +772,11 @@ static sector_t f2fs_bmap(struct address_space *mapping, sector_t block)
 	return generic_block_bmap(mapping, block, get_data_block_ro);
 }
 
+static int f2fs_get_context_data(struct page *page)
+{
+	return get_segment_type(page, DATA) + 1;        
+}
+
 const struct address_space_operations f2fs_dblock_aops = {
 	.readpage	= f2fs_read_data_page,
 	.readpages	= f2fs_read_data_pages,
@@ -784,4 +789,5 @@ const struct address_space_operations f2fs_dblock_aops = {
 	.releasepage	= f2fs_release_data_page,
 	.direct_IO	= f2fs_direct_IO,
 	.bmap		= f2fs_bmap,
+	.get_context    = f2fs_get_context_data,                
 };

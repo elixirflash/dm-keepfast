@@ -293,6 +293,12 @@ alloc_new:
 			goto confused;
 	}
 
+	if (page && page->mapping && page->mapping->a_ops &&
+			page->mapping->a_ops->get_context)
+		bio->bi_context = page->mapping->a_ops->get_context(page);
+	else
+		bio->bi_context = 0;        
+
 	length = first_hole << blkbits;
 	if (bio_add_page(bio, page, length, 0) < length) {
 		bio = mpage_bio_submit(READ, bio);
@@ -584,6 +590,12 @@ alloc_new:
 		if (bio == NULL)
 			goto confused;
 	}
+
+	if (page && page->mapping && page->mapping->a_ops &&
+			page->mapping->a_ops->get_context)
+		bio->bi_context = page->mapping->a_ops->get_context(page);
+	else
+		bio->bi_context = 0;        
 
 	/*
 	 * Must try to add the page before marking the buffer clean or

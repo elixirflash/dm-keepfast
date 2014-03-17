@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 #include <linux/crc32.h>
 #include <linux/magic.h>
+#include <linux/jbd.h>
 
 /*
  * For mount options
@@ -932,6 +933,7 @@ void update_inode(struct inode *, struct page *);
 int update_inode_page(struct inode *);
 int f2fs_write_inode(struct inode *, struct writeback_control *);
 void f2fs_evict_inode(struct inode *);
+int f2fs_get_context(struct page *page);
 
 /*
  * namei.c
@@ -1011,7 +1013,7 @@ void clear_prefree_segments(struct f2fs_sb_info *);
 int npages_for_summary_flush(struct f2fs_sb_info *);
 void allocate_new_segments(struct f2fs_sb_info *);
 struct page *get_sum_page(struct f2fs_sb_info *, unsigned int);
-struct bio *f2fs_bio_alloc(struct block_device *, int);
+struct bio *f2fs_bio_alloc(struct block_device *, int, struct page *);
 void f2fs_submit_bio(struct f2fs_sb_info *, enum page_type, bool sync);
 void write_meta_page(struct f2fs_sb_info *, struct page *);
 void write_node_page(struct f2fs_sb_info *, struct page *, unsigned int,
@@ -1030,6 +1032,7 @@ int lookup_journal_in_cursum(struct f2fs_summary_block *,
 void flush_sit_entries(struct f2fs_sb_info *);
 int build_segment_manager(struct f2fs_sb_info *);
 void destroy_segment_manager(struct f2fs_sb_info *);
+int get_segment_type(struct page *page, enum page_type p_type);
 
 /*
  * checkpoint.c

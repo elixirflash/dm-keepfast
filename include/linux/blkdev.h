@@ -161,6 +161,7 @@ struct request {
 	struct list_head timeout_list;
 	unsigned int timeout;
 	int retries;
+	unsigned long context;  /* context of this request */        
 
 	/*
 	 * completion callback.

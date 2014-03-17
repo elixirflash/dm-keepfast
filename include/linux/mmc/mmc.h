@@ -277,6 +277,7 @@ struct _mmc_csd {
 #define EXT_CSD_POWER_OFF_NOTIFICATION	34	/* R/W */
 #define EXT_CSD_PACKED_FAILURE_INDEX	35	/* RO */
 #define EXT_CSD_PACKED_CMD_STATUS	36	/* RO */
+#define EXT_CSD_CONTEXT_CONF           	37      /* R/W */
 #define EXT_CSD_EXP_EVENTS_STATUS	54	/* RO, 2 bytes */
 #define EXT_CSD_EXP_EVENTS_CTRL		56	/* R/W, 2 bytes */
 #define EXT_CSD_PARTITION_ATTRIBUTE	156	/* R/W */
@@ -318,6 +319,8 @@ struct _mmc_csd {
 #define EXT_CSD_POWER_OFF_LONG_TIME	247	/* RO */
 #define EXT_CSD_GENERIC_CMD6_TIME	248	/* RO */
 #define EXT_CSD_CACHE_SIZE		249	/* RO, 4 bytes */
+#define EXT_CSD_CONTEXT_LAGRE_INIT_SIZE_M1   	495 /* RO */
+#define EXT_CSD_CONTEXT_CAPABILITIES     	496 /* RO */
 #define EXT_CSD_MAX_PACKED_WRITES	500	/* RO */
 #define EXT_CSD_MAX_PACKED_READS	501	/* RO */
 #define EXT_CSD_HPI_FEATURES		503	/* RO */

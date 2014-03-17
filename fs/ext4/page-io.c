@@ -308,6 +308,7 @@ static int io_submit_init(struct ext4_io_submit *io,
 
 	bio->bi_sector = bh->b_blocknr * (bh->b_size >> 9);
 	bio->bi_bdev = bh->b_bdev;
+	bio->bi_context = bh->b_context;        
 	bio->bi_private = io->io_end = io_end;
 	bio->bi_end_io = ext4_end_bio;
 

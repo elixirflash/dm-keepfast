@@ -112,8 +112,8 @@ static int recover_inode(struct inode *inode, struct page *node_page)
 	if (is_dent_dnode(node_page))
 		return recover_dentry(node_page, inode);
 
-	f2fs_msg(inode->i_sb, KERN_NOTICE, "recover_inode: ino = %x, name = %s",
-			ino_of_node(node_page), raw_inode->i_name);
+//	f2fs_msg(inode->i_sb, KERN_NOTICE, "recover_inode: ino = %x, name = %s",
+//			ino_of_node(node_page), raw_inode->i_name);
 	return 0;
 }
 

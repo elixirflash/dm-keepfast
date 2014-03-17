@@ -411,8 +411,41 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 			ext_csd[EXT_CSD_SEC_FEATURE_SUPPORT];
 		card->ext_csd.trim_timeout = 300 *
 			ext_csd[EXT_CSD_TRIM_MULT];
-	}
 
+		card->ext_csd.max_context_id =
+			ext_csd[EXT_CSD_CONTEXT_CAPABILITIES] & 0x0f;
+                
+		card->ext_csd.context_large_unit_size = (1 << 20) * (ext_csd[EXT_CSD_CONTEXT_LAGRE_INIT_SIZE_M1] + 1);
+                
+		if ((card->ext_csd.max_context_id > 0) && 
+                    (card->ext_csd.max_context_id < VALID_MAX_MMC_CONTEXT_ID)) {
+			pr_warning("%s: card has invalid number of contexts [%d]\n", 
+				mmc_hostname(card->host),
+                                   card->ext_csd.max_context_id);
+                        card->ext_csd.max_context_id = 0;		
+		}
+#ifdef CONFIG_MMC_CONTEXT_ID
+                if (host->caps2 & MMC_CAP2_CONTEXT) {
+                        if (card->ext_csd.max_context_id > 0) {
+                                err = mmc_init_context(card);
+                                if (err && err != -EBADMSG)
+                                        goto free_card;
+                                if (err) {
+                                        pr_warning("%s: failed to activate context (%x)\n",
+                                                   mmc_hostname(card->host), err);
+					card->ext_csd.max_context_id = 0;
+					err = 0;
+                                } else
+                                        printk (KERN_INFO "Enabled Context ID !!\n");
+                        }
+                } else
+                        card->ext_csd.max_context_id = 0;
+                
+#else
+                card->ext_csd.max_context_id = 0;
+#endif                
+	}
+        
 	if (card->ext_csd.rev >= 5) {
 		/* check whether the eMMC card supports HPI */
 		if (ext_csd[EXT_CSD_HPI_FEATURES] & 0x1) {

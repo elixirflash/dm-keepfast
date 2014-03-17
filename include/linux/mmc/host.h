@@ -249,6 +249,9 @@ struct mmc_host {
 #define MMC_CAP2_PACKED_WR	(1 << 4)	/* Allow packed write */
 #define MMC_CAP2_PACKED_CMD	(MMC_CAP2_PACKED_RD | \
 				 MMC_CAP2_PACKED_WR) /* Allow packed commands */
+
+#define MMC_CAP2_CONTEXT        (1 << 7)        /* Contextid supported */
+        
 #define MMC_CAP2_NO_MULTI_READ	(1 << 5)	/* Multiblock reads don't work */
 #define MMC_CAP2_NO_SLEEP_CMD	(1 << 6)	/* Don't allow sleep command */
 #define MMC_CAP2_HS200_1_8V_SDR	(1 << 7)        /* can support */

@@ -608,7 +608,7 @@ static void f2fs_end_io_write(struct bio *bio, int err)
 	bio_put(bio);
 }
 
-struct bio *f2fs_bio_alloc(struct block_device *bdev, int npages)
+struct bio *f2fs_bio_alloc(struct block_device *bdev, int npages, struct page *page)
 {
 	struct bio *bio;
 	struct bio_private *priv;
@@ -623,6 +623,9 @@ retry:
 	bio = bio_alloc(GFP_NOIO, npages);
 	bio->bi_bdev = bdev;
 	bio->bi_private = priv;
+
+        bio->bi_context = f2fs_get_context(page);
+
 	return bio;
 }
 
@@ -681,7 +684,7 @@ static void submit_write_page(struct f2fs_sb_info *sbi, struct page *page,
 		do_submit_bio(sbi, type, false);
 alloc_new:
 	if (sbi->bio[type] == NULL) {
-		sbi->bio[type] = f2fs_bio_alloc(bdev, max_hw_blocks(sbi));
+		sbi->bio[type] = f2fs_bio_alloc(bdev, max_hw_blocks(sbi), page);
 		sbi->bio[type]->bi_sector = SECTOR_FROM_BLOCK(sbi, blk_addr);
 		/*
 		 * The end_io will be assigned at the sumbission phase.
@@ -755,7 +758,7 @@ static int __get_segment_type_6(struct page *page, enum page_type p_type)
 	}
 }
 
-static int __get_segment_type(struct page *page, enum page_type p_type)
+int get_segment_type(struct page *page, enum page_type p_type)
 {
 	struct f2fs_sb_info *sbi = F2FS_SB(page->mapping->host->i_sb);
 	switch (sbi->active_logs) {
@@ -778,7 +781,7 @@ static void do_write_page(struct f2fs_sb_info *sbi, struct page *page,
 	unsigned int old_cursegno;
 	int type;
 
-	type = __get_segment_type(page, p_type);
+	type = get_segment_type(page, p_type);
 	curseg = CURSEG_I(sbi, type);
 
 	mutex_lock(&curseg->curseg_mutex);

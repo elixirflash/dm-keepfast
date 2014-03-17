@@ -1155,10 +1155,13 @@ static void mmc_blk_rw_rq_prep(struct mmc_queue_req *mqrq,
 
 	if ((md->flags & MMC_BLK_CMD23) &&
 	    mmc_op_multi(brq->cmd.opcode) &&
-	    (do_rel_wr || !(card->quirks & MMC_QUIRK_BLK_NO_CMD23))) {
+	    (do_rel_wr || !(card->quirks & MMC_QUIRK_BLK_NO_CMD23)
+             || (card->ext_csd.max_context_id > 0))) {
+		int context_id = req->context ? (req->context % MAX_MMC_CONTEXT_ID + 1) : 0;
+
 		brq->sbc.opcode = MMC_SET_BLOCK_COUNT;
 		brq->sbc.arg = brq->data.blocks |
-			(do_rel_wr ? (1 << 31) : 0);
+			(do_rel_wr ? (1 << 31) : 0) | context_id << 25;
 		brq->sbc.flags = MMC_RSP_R1 | MMC_CMD_AC;
 		brq->mrq.sbc = &brq->sbc;
 	}
@@ -1755,10 +1758,30 @@ static int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
 			mmc_blk_issue_rw_rq(mq, NULL);
 		ret = mmc_blk_issue_flush(mq, req);
 	} else {
+		if (req && (req->cmd_flags & REQ_SYNC) &&
+                    req->context && card->ext_csd.max_context_id) {
+			int context_cfg_id =
+                                req->context % card->ext_csd.max_context_id;
+
+			/*
+                         * The SYNC command is a synchronization point from
+                         * file system. The relevent context is sync'ed here
+                         * to ensure that the data written in the open context
+                         * are saved reliably in non-volatile media
+                         */
+			if (card->host->areq)
+				mmc_blk_issue_rw_rq(mq, NULL);
+			mmc_sync_context(card, context_cfg_id);
+			/*
+                         * This write will go without context to ensure
+                         * that it is reliably written
+                         */
+			req->context = 0;
+		}                
 		ret = mmc_blk_issue_rw_rq(mq, req);
 	}
-
-out:
+        
+ out:
 	if (!req)
 		/* release host only when there are no more requests */
 		mmc_release_host(card->host);

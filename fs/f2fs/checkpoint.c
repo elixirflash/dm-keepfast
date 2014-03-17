@@ -176,11 +176,18 @@ static int f2fs_set_meta_page_dirty(struct page *page)
 	return 0;
 }
 
+static int f2fs_get_context_meta(struct page *page)
+{
+	return 7;        
+}
+
 const struct address_space_operations f2fs_meta_aops = {
 	.writepage	= f2fs_write_meta_page,
 	.writepages	= f2fs_write_meta_pages,
 	.set_page_dirty	= f2fs_set_meta_page_dirty,
+	.get_context    = f2fs_get_context_meta,                        
 };
+
 
 int check_orphan_space(struct f2fs_sb_info *sbi)
 {

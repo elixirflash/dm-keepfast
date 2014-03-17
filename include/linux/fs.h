@@ -614,6 +614,7 @@ struct address_space_operations {
 	int (*is_partially_uptodate) (struct page *, read_descriptor_t *,
 					unsigned long);
 	int (*error_remove_page)(struct address_space *, struct page *);
+	int (*get_context)(struct page *);        
 };
 
 extern const struct address_space_operations empty_aops;

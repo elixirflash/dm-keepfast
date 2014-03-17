@@ -183,6 +183,10 @@ extern int mmc_try_claim_host(struct mmc_host *host);
 
 extern int mmc_flush_cache(struct mmc_card *);
 
+extern int mmc_sync_context(struct mmc_card *card, int context_id);
+extern int mmc_flush_contexts(struct mmc_card *card);
+extern int mmc_init_context(struct mmc_card *card);
+
 /**
  *	mmc_claim_host - exclusively claim a host
  *	@host: mmc host to claim

@@ -1201,6 +1201,8 @@ void init_request_from_bio(struct request *req, struct bio *bio)
 	req->errors = 0;
 	req->__sector = bio->bi_sector;
 	req->ioprio = bio_prio(bio);
+	req->context = bio->bi_context;
+
 	blk_rq_bio_prep(req->q, req, bio);
 }
 

@@ -1223,6 +1223,11 @@ static int f2fs_release_node_page(struct page *page, gfp_t wait)
 	return 1;
 }
 
+static int f2fs_get_context_node(struct page *page)
+{
+	return get_segment_type(page, NODE) + 1;        
+}
+
 /*
  * Structure of the f2fs node operations
  */
@@ -1232,6 +1237,7 @@ const struct address_space_operations f2fs_node_aops = {
 	.set_page_dirty	= f2fs_set_node_page_dirty,
 	.invalidatepage	= f2fs_invalidate_node_page,
 	.releasepage	= f2fs_release_node_page,
+	.get_context    = f2fs_get_context_node,                
 };
 
 static struct free_nid *__lookup_free_nid_list(nid_t n, struct list_head *head)

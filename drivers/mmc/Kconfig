@@ -41,7 +41,12 @@ config MMC_POWEROFF_NOTIFY
 	bool "Enable power off notify"
 	depends on MMC_4_5_FEATURE_SUPPORT != n
 	help
-	  If you want MMC power off notify support, you should say Y here  
+	  If you want MMC power off notify support, you should say Y here
+
+config MMC_CONTEXT_ID
+	bool "Enable context id"
+	depends on MMC_4_5_FEATURE_SUPPORT != n
+	help          
 	  
 config MMC_POLLING_WAIT_CMD23
 	bool "Wait for cmd23's done interrupt by polling check (EXPERIMENTAL)"

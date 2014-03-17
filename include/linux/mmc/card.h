@@ -94,6 +94,9 @@ struct mmc_ext_csd {
 	u8			raw_trim_mult;		/* 232 */
 	u8			raw_sectors[4];		/* 212 - 4 bytes */
 
+	unsigned int    	context_large_unit_size;
+	unsigned int            max_context_id;        
+
 	unsigned int            feature_support;
 #define MMC_DISCARD_FEATURE	BIT(0)                  /* CMD38 feature */
 };
@@ -175,6 +178,11 @@ struct sdio_func;
 struct sdio_func_tuple;
 
 #define SDIO_MAX_FUNCS		7
+
+#define MAX_MMC_CONTEXT_ID             15
+#define VALID_MAX_MMC_CONTEXT_ID       5
+#define MMC_CONTEXT_CLOSE              0
+#define MMC_CONTEXT_ACT_RW             3
 
 /*
  * MMC device

@@ -2323,6 +2323,67 @@ int mmc_cache_ctrl(struct mmc_host *host, u8 enable)
 }
 EXPORT_SYMBOL(mmc_cache_ctrl);
 
+static inline int mmc_set_context_conf(struct mmc_card *card,
+                               int context_cfg_id, int context_act_dir)
+{
+	return mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+			EXT_CSD_CONTEXT_CONF + context_cfg_id,
+			context_act_dir, card->ext_csd.generic_cmd6_time);
+}
+
+/*
+ * Synchronize a context by first closing the context and then
+ * opening it
+ */
+int mmc_sync_context(struct mmc_card *card, int context_cfg_id)
+{
+	int err = 0;
+
+	err = mmc_set_context_conf(card, context_cfg_id, MMC_CONTEXT_CLOSE);
+	if (err)
+		return err;
+
+	err = mmc_set_context_conf(card, context_cfg_id, MMC_CONTEXT_ACT_RW);
+        return err;
+}
+EXPORT_SYMBOL(mmc_sync_context);
+
+int mmc_flush_contexts(struct mmc_card *card)
+{
+	int i, err = 0;
+
+	for (i = 0; i < card->ext_csd.max_context_id; i++) {
+		int err1 = mmc_sync_context(card, i);
+		err = (err1 && !err) ? err1 : err;
+	}
+	return err;
+}
+EXPORT_SYMBOL(mmc_flush_contexts);
+
+/*
+ * Initialize all the MMC contexts in read-write and non-LU mode
+ */
+int mmc_init_context(struct mmc_card *card)
+{
+	int i, err = 0;
+
+	for (i = 0; i < card->ext_csd.max_context_id; i++) {
+		err = mmc_set_context_conf(card, i, MMC_CONTEXT_ACT_RW);
+		if (err) {
+			pr_warning("%s: Activating of context %d failed [%x]\n",
+			mmc_hostname(card->host), i, err);
+			break;
+		}
+	}
+
+	if (!err)
+	return 0;
+
+	card->ext_csd.max_context_id = i;
+	return err;
+}
+EXPORT_SYMBOL(mmc_init_context);
+
 #ifdef CONFIG_PM
 
 /**

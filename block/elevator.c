@@ -106,6 +106,9 @@ int elv_rq_merge_ok(struct request *rq, struct bio *bio)
 	if (bio_integrity(bio) != blk_integrity_rq(rq))
 		return 0;
 
+	if (bio->bi_context != rq->bio->bi_context)
+		return false;        
+
 	if (!elv_iosched_allow_merge(rq, bio))
 		return 0;
 

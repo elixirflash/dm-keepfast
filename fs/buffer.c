@@ -2942,6 +2942,8 @@ int submit_bh(int rw, struct buffer_head * bh)
 	bio->bi_end_io = end_bio_bh_io_sync;
 	bio->bi_private = bh;
 
+	bio->bi_context = bh->b_context;        
+
 	bio_get(bio);
 	submit_bio(rw, bio);
 

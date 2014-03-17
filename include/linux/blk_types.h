@@ -43,6 +43,8 @@ struct bio {
 	unsigned short		bi_vcnt;	/* how many bio_vec's */
 	unsigned short		bi_idx;		/* current index into bvl_vec */
 
+	unsigned long		bi_context;     /* contextid of this bio */        
+
 	/* Number of segments in this BIO after
 	 * physical address coalescing is performed.
 	 */

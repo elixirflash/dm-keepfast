@@ -71,6 +71,9 @@ struct buffer_head {
 	struct list_head b_assoc_buffers; /* associated with another mapping */
 	struct address_space *b_assoc_map;	/* mapping this buffer is
 						   associated with */
+
+	unsigned long   b_context; /* context for this buffer within the
+                                                      storage device */                                      
 	atomic_t b_count;		/* users using this buffer_head */
 };
 
