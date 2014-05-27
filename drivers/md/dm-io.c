@@ -96,7 +96,7 @@ static void store_io_and_region_in_bio(struct bio *bio, struct io *io,
 		BUG();
 	}
 
-	bio->bi_private = (void *)((unsigned long)io | region);
+        bio->bi_private = (void *)((unsigned long)io | region);
 }
 
 static void retrieve_io_and_region_from_bio(struct bio *bio, struct io **io,
@@ -105,6 +105,7 @@ static void retrieve_io_and_region_from_bio(struct bio *bio, struct io **io,
 	unsigned long val = (unsigned long)bio->bi_private;
 
 	*io = (void *)(val & -(unsigned long)DM_IO_MAX_REGIONS);
+
 	*region = val & (DM_IO_MAX_REGIONS - 1);
 }
 
@@ -307,7 +308,7 @@ static void do_region(int rw, unsigned region, struct dm_io_region *where,
 		/*
 		 * Allocate a suitably sized-bio.
 		 */
-		if (rw & REQ_DISCARD)
+		if ((rw & REQ_DISCARD) || (rw & REQ_WRITE_SAME))
 			num_bvecs = 1;
 		else
 			num_bvecs = min_t(int, bio_get_nr_vecs(where->bdev),
@@ -318,6 +319,7 @@ static void do_region(int rw, unsigned region, struct dm_io_region *where,
 		bio->bi_bdev = where->bdev;
 		bio->bi_end_io = endio;
 		bio->bi_destructor = dm_bio_destructor;
+
 		store_io_and_region_in_bio(bio, io, region);
 
 		if (rw & REQ_DISCARD) {
@@ -325,16 +327,31 @@ static void do_region(int rw, unsigned region, struct dm_io_region *where,
 			bio->bi_size = discard_sectors << SECTOR_SHIFT;
 			remaining -= discard_sectors;
 		} else while (remaining) {
+                        struct bio_vec *bvec;
+                        int i = 0;
+                                
 			/*
 			 * Try and add as many pages as possible.
 			 */
 			dp->get_page(dp, &page, &len, &offset);
-			len = min(len, to_bytes(remaining));
-			if (!bio_add_page(bio, page, len, offset))
-				break;
 
+			len = min(len, to_bytes(remaining));
+                        
+                        if (!bio_add_page(bio, page, len, offset))
+                                break;
+
+                        if(where->rvec_count) {
+                                bvec = &bio->bi_io_vec[bio->bi_vcnt-1];
+                                bvec->rvec_count = where->rvec_count;                                
+                                for(i = 0; i < where->rvec_count; i++) {
+                                        bvec->rvec[i].rv_offset = where->rvec[i].rv_offset;
+                                        bvec->rvec[i].rv_len = where->rvec[i].rv_len;
+                                }
+                        }
+
+                        remaining -= to_sector(len);
+                        
 			offset = 0;
-			remaining -= to_sector(len);
 			dp->next_page(dp);
 		}
 
@@ -486,7 +503,7 @@ static int dp_init(struct dm_io_request *io_req, struct dpages *dp,
  * If the IO is asynchronous (i.e. it has notify.fn), you must either unplug
  * the queue with blk_unplug() some time later or set REQ_SYNC in
 io_req->bi_rw. If you fail to do one of these, the IO will be submitted to
- * the disk after q->unplug_delay, which defaults to 3ms in blk-settings.c.
+ *e the disk after q->unplug_delay, which defaults to 3ms in blk-settings.c.
  */
 int dm_io(struct dm_io_request *io_req, unsigned num_regions,
 	  struct dm_io_region *where, unsigned long *sync_error_bits)

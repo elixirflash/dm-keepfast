@@ -17,6 +17,13 @@ struct block_device;
 typedef void (bio_end_io_t) (struct bio *, int);
 typedef void (bio_destructor_t) (struct bio *);
 
+struct ram_vec {
+        unsigned int    rv_len;
+        unsigned int    rv_offset;        
+};
+
+
+#define MAX_RVEC_CNT    2
 /*
  * was unsigned short, but we might as well be ready for > 64kB I/O pages
  */
@@ -24,6 +31,8 @@ struct bio_vec {
 	struct page	*bv_page;
 	unsigned int	bv_len;
 	unsigned int	bv_offset;
+        unsigned int    rvec_count;
+        struct ram_vec  rvec[MAX_RVEC_CNT];
 };
 
 /*
@@ -76,6 +85,8 @@ struct bio {
 
 	bio_destructor_t	*bi_destructor;	/* destructor */
 
+        struct bio_set          *bi_pool;
+
 	/*
 	 * We can inline a number of vecs at the end of the bio, to avoid
 	 * double allocations for a small number of bio_vecs. This member
@@ -127,6 +138,7 @@ enum rq_flag_bits {
 	__REQ_SYNC,		/* request is sync (sync write or read) */
 	__REQ_META,		/* metadata io request */
 	__REQ_DISCARD,		/* request to discard sectors */
+	__REQ_WRITE_SAME,	/* write same block many times */            
 	__REQ_NOIDLE,		/* don't anticipate more IO after this one */
 
 	/* bio only flags */
@@ -150,6 +162,7 @@ enum rq_flag_bits {
 	__REQ_COPY_USER,	/* contains copies of user pages */
 	__REQ_FLUSH,		/* request for cache flush */
 	__REQ_FLUSH_SEQ,	/* request for flush sequence */
+        __REQ_HOT,
 	__REQ_IO_STAT,		/* account I/O stat */
 	__REQ_MIXED_MERGE,	/* merge of different types, fail separately */
 	__REQ_SECURE,		/* secure discard (used with __REQ_DISCARD) */
@@ -163,13 +176,14 @@ enum rq_flag_bits {
 #define REQ_SYNC		(1 << __REQ_SYNC)
 #define REQ_META		(1 << __REQ_META)
 #define REQ_DISCARD		(1 << __REQ_DISCARD)
+#define REQ_WRITE_SAME		(1 << __REQ_WRITE_SAME)
 #define REQ_NOIDLE		(1 << __REQ_NOIDLE)
 
 #define REQ_FAILFAST_MASK \
 	(REQ_FAILFAST_DEV | REQ_FAILFAST_TRANSPORT | REQ_FAILFAST_DRIVER)
 #define REQ_COMMON_MASK \
 	(REQ_WRITE | REQ_FAILFAST_MASK | REQ_SYNC | REQ_META | REQ_DISCARD | \
-	 REQ_NOIDLE | REQ_FLUSH | REQ_FUA | REQ_SECURE)
+	 REQ_NOIDLE | REQ_FLUSH | REQ_FUA | REQ_SECURE | REQ_HOT)
 #define REQ_CLONE_MASK		REQ_COMMON_MASK
 
 #define REQ_RAHEAD		(1 << __REQ_RAHEAD)
@@ -182,6 +196,7 @@ enum rq_flag_bits {
 #define REQ_STARTED		(1 << __REQ_STARTED)
 #define REQ_DONTPREP		(1 << __REQ_DONTPREP)
 #define REQ_QUEUED		(1 << __REQ_QUEUED)
+#define REQ_HOT                 (1 << __REQ_HOT)
 #define REQ_ELVPRIV		(1 << __REQ_ELVPRIV)
 #define REQ_FAILED		(1 << __REQ_FAILED)
 #define REQ_QUIET		(1 << __REQ_QUIET)

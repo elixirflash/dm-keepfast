@@ -1,0 +1,3 @@
+#!/bin/sh
+adb push fs/fat/fat.ko /data
+adb push fs/fat/vfat.ko /data

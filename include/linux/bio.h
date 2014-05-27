@@ -65,7 +65,9 @@
 #define bio_page(bio)		bio_iovec((bio))->bv_page
 #define bio_offset(bio)		bio_iovec((bio))->bv_offset
 #define bio_segments(bio)	((bio)->bi_vcnt - (bio)->bi_idx)
-#define bio_sectors(bio)	((bio)->bi_size >> 9)
+#define bio_sectors(bio)	          \
+        ((bio)->bi_size >> 9) + ((bio)->bi_size & ((1 << 9) - 1) ? 1 : 0)
+
 
 static inline unsigned int bio_cur_bytes(struct bio *bio)
 {

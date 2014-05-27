@@ -1683,7 +1683,7 @@ static int mmc_do_erase(struct mmc_card *card, unsigned int from,
 	}
 
 	// HY discard yongja ------------------------------------------------
-#if 1
+#if 0
 	printk (KERN_INFO "[%s] start : %u, end : %u, arg : 0x%x\n", __func__, from, to, arg);
 #endif	
 	// -----------------------------------------------------------
@@ -2271,6 +2271,7 @@ int mmc_flush_cache(struct mmc_card *card)
 	if (!(host->caps2 & MMC_CAP2_CACHE_CTRL))
 		return err;
 
+
 	if (mmc_card_mmc(card) &&
 			(card->ext_csd.cache_size > 0) &&
 			(card->ext_csd.cache_ctrl & 1)) {
@@ -2297,7 +2298,7 @@ int mmc_cache_ctrl(struct mmc_host *host, u8 enable)
 	int err = 0;
 
 	if (!(host->caps2 & MMC_CAP2_CACHE_CTRL) ||
-			mmc_card_is_removable(host))
+            mmc_card_is_removable(host)) 
 		return err;
 
 	if (card && mmc_card_mmc(card) &&

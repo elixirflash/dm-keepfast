@@ -42,6 +42,7 @@
 #include <linux/printk.h>
 #include <linux/slab.h>
 #include <linux/ratelimit.h>
+#include <linux/ctype.h>
 
 #include "ext4_jbd2.h"
 #include "xattr.h"
@@ -51,6 +52,50 @@
 #include <trace/events/ext4.h>
 
 #define MPAGE_DA_EXTENT_TAIL 0x01
+
+#ifdef CONFIG_DM_KEEPFAST
+
+char *db_extention_list[] = {
+        "db", "db-shm", "db-wal", "db-journal",
+};
+
+static int cmp_db_file(const unsigned char *s, const char *sub)
+{
+	size_t slen = strlen(s);
+	size_t sublen = strlen(sub);
+	int ret;
+
+	if (sublen > slen)
+		return 1;
+
+	ret = memcmp(s + slen - sublen, sub, sublen);
+	if (ret) {	/* compare upper case */
+		int i;
+		char upper_sub[8];
+		for (i = 0; i < sublen && i < sizeof(upper_sub); i++)
+			upper_sub[i] = toupper(sub[i]);
+		return memcmp(s + slen - sublen, upper_sub, sublen);
+	}
+
+	return ret;
+}
+
+int is_cache_file(unsigned char *name)
+{
+        int extention_count;
+        int i;
+
+        extention_count = sizeof(db_extention_list) / sizeof(char *);
+
+        for(i = 0; i < extention_count; i++) {
+                if(!cmp_db_file(name, db_extention_list[i]))
+                        return 1;
+        }
+
+        return 0;
+}
+
+#endif
 
 static inline int ext4_begin_ordered_truncate(struct inode *inode,
 					      loff_t new_size)
@@ -1512,6 +1557,12 @@ struct buffer_head *ext4_bread(handle_t *handle, struct inode *inode,
 	return NULL;
 }
 
+static int ext4_set_buffer_hot(handle_t *handle, struct buffer_head *bh)
+{
+        set_buffer_hot(bh);                                
+	return 0;
+}
+
 static int walk_page_buffers(handle_t *handle,
 			     struct buffer_head *head,
 			     unsigned from,
@@ -1708,6 +1759,31 @@ retry:
 
 	if (ret == -ENOSPC && ext4_should_retry_alloc(inode->i_sb, &retries))
 		goto retry;
+
+#ifdef CONFIG_DM_KEEPFAST      
+        if(!ret) {
+                if(page_has_buffers(page)) {
+                        struct dentry *dentry;
+                        char *name;
+                        
+                        dentry = d_find_alias(inode);
+                        if (dentry) {
+                                spin_lock(&dentry->d_lock);
+                                name = (char *) dentry->d_name.name;
+                                spin_unlock(&dentry->d_lock);
+                                
+                                if(is_cache_file(name)) {                                  
+                                        if (walk_page_buffers(NULL, page_buffers(page),
+                                                              from, to, NULL, ext4_set_buffer_hot)) {
+                                                ext4_warning(inode->i_sb, "Couldn't set hot flag\n");
+                                        }
+                                }
+                        }
+                        dput(dentry);                                                                
+                }
+        }
+#endif
+        
 out:
 	return ret;
 }
@@ -3200,13 +3276,28 @@ retry:
 	if (ret == -ENOSPC && ext4_should_retry_alloc(inode->i_sb, &retries))
 		goto retry;
 
-	if (page_has_buffers(page)) {
-		if (walk_page_buffers(NULL, page_buffers(page),
-		               from, to, NULL, ext4_set_buffer_context)) {
-			ext4_warning(inode->i_sb, "Couldn't set context\n");
-		}
-	}
-        
+#ifdef CONFIG_DM_KEEPFAST        
+        if(!ret) {
+                if(page_has_buffers(page)) {
+                        struct dentry *dentry;
+                        char *name;
+                        
+                        dentry = d_find_alias(inode);
+                        if (dentry) {
+                                spin_lock(&dentry->d_lock);
+                                name = (char *) dentry->d_name.name;
+                                spin_unlock(&dentry->d_lock);
+                                if(is_cache_file(name)) {                                  
+                                        if (walk_page_buffers(NULL, page_buffers(page),
+                                                              from, to, NULL, ext4_set_buffer_hot)) {
+                                                ext4_warning(inode->i_sb, "Couldn't set hot flag\n");
+                                        }
+                                }
+                        }
+                        dput(dentry);                                                                
+                }
+        }
+#endif        
 out:
 	return ret;
 }

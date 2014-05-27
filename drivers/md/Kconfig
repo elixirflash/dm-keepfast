@@ -57,6 +57,13 @@ config MD_LINEAR
 
 	  If unsure, say Y.
 
+config DM_KEEPFAST
+       tristate "Keepfast target (EXPERIMENTAL)"
+       depends on BLK_DEV_DM
+       default n
+       ---help---
+         keepfast          
+
 config MD_RAID0
 	tristate "RAID-0 (striping) mode"
 	depends on BLK_DEV_MD

@@ -288,6 +288,7 @@ struct bio *bio_alloc_bioset(gfp_t gfp_mask, int nr_iovecs, struct bio_set *bs)
 	bio = p + bs->front_pad;
 
 	bio_init(bio);
+        bio->bi_pool = bs;
 
 	if (unlikely(!nr_iovecs))
 		goto out_set;
@@ -302,6 +303,8 @@ struct bio *bio_alloc_bioset(gfp_t gfp_mask, int nr_iovecs, struct bio_set *bs)
 
 		nr_iovecs = bvec_nr_vecs(idx);
 	}
+
+        bvl->rvec_count = 0;
 out_set:
 	bio->bi_flags |= idx << BIO_POOL_OFFSET;
 	bio->bi_max_vecs = nr_iovecs;
@@ -313,11 +316,6 @@ err_free:
 	return NULL;
 }
 EXPORT_SYMBOL(bio_alloc_bioset);
-
-static void bio_fs_destructor(struct bio *bio)
-{
-	bio_free(bio, fs_bio_set);
-}
 
 /**
  *	bio_alloc - allocate a new bio, memory pool backed
@@ -340,12 +338,7 @@ static void bio_fs_destructor(struct bio *bio)
  */
 struct bio *bio_alloc(gfp_t gfp_mask, int nr_iovecs)
 {
-	struct bio *bio = bio_alloc_bioset(gfp_mask, nr_iovecs, fs_bio_set);
-
-	if (bio)
-		bio->bi_destructor = bio_fs_destructor;
-
-	return bio;
+	return bio_alloc_bioset(gfp_mask, nr_iovecs, fs_bio_set);
 }
 EXPORT_SYMBOL(bio_alloc);
 
@@ -420,8 +413,13 @@ void bio_put(struct bio *bio)
 	 */
 	if (atomic_dec_and_test(&bio->bi_cnt)) {
 		bio->bi_next = NULL;
-		bio->bi_destructor(bio);
+
+                if(bio->bi_pool)
+                        bio_free(bio, bio->bi_pool);
+                else
+                        bio->bi_destructor(bio);
 	}
+
 }
 EXPORT_SYMBOL(bio_put);
 
@@ -471,12 +469,11 @@ EXPORT_SYMBOL(__bio_clone);
  */
 struct bio *bio_clone(struct bio *bio, gfp_t gfp_mask)
 {
-	struct bio *b = bio_alloc_bioset(gfp_mask, bio->bi_max_vecs, fs_bio_set);
+        struct bio *b = bio_alloc(gfp_mask, bio->bi_max_vecs);
 
 	if (!b)
 		return NULL;
 
-	b->bi_destructor = bio_fs_destructor;
 	__bio_clone(b, bio);
 
 	if (bio_integrity(bio)) {
@@ -592,6 +589,7 @@ static int __bio_add_page(struct request_queue *q, struct bio *bio, struct page
 	bvec->bv_page = page;
 	bvec->bv_len = len;
 	bvec->bv_offset = offset;
+        bvec->rvec_count = 0;
 
 	/*
 	 * if queue has other restrictions (eg varying max sector size
@@ -639,7 +637,7 @@ static int __bio_add_page(struct request_queue *q, struct bio *bio, struct page
  *
  *	Attempt to add a page to the bio_vec maplist. This can fail for a
  *	number of reasons, such as the bio being full or target block device
- *	limitations. The target block device must allow bio's up to PAGE_SIZE,
+[p *	limitations. The target block device must allow bio's up to PAGE_SIZE,
  *	so it is always possible to add a single page to an empty bio.
  *
  *	This should only be used by REQ_PC bios.

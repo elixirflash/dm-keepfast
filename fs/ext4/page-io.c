@@ -316,6 +316,9 @@ static int io_submit_init(struct ext4_io_submit *io,
 
 	io->io_bio = bio;
 	io->io_op = (wbc->sync_mode == WB_SYNC_ALL ?  WRITE_SYNC : WRITE);
+        if(buffer_hot(bh)) 
+                io->io_op |= REQ_HOT;
+        
 	io->io_next_block = bh->b_blocknr;
 	return 0;
 }

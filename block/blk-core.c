@@ -38,7 +38,7 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(block_bio_remap);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_remap);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_bio_complete);
 
-static int __make_request(struct request_queue *q, struct bio *bio);
+int __make_request(struct request_queue *q, struct bio *bio);
 
 /*
  * For the allocated request tables
@@ -1206,7 +1206,7 @@ void init_request_from_bio(struct request *req, struct bio *bio)
 	blk_rq_bio_prep(req->q, req, bio);
 }
 
-static int __make_request(struct request_queue *q, struct bio *bio)
+int __make_request(struct request_queue *q, struct bio *bio)
 {
 	const bool sync = !!(bio->bi_rw & REQ_SYNC);
 	struct blk_plug *plug;
@@ -1614,6 +1614,8 @@ void submit_bio(int rw, struct bio *bio)
 	 * go through the normal accounting stuff before submission.
 	 */
 	if (bio_has_data(bio) && !(rw & REQ_DISCARD)) {
+                count = bio_sectors(bio);
+                
 		if (rw & WRITE) {
 			count_vm_events(PGPGOUT, count);
 		} else {
@@ -2592,7 +2594,7 @@ int blk_rq_prep_clone(struct request *rq, struct request *rq_src,
 
 free_and_out:
 	if (bio)
-		bio_free(bio, bs);
+                bio_put(bio);
 	blk_rq_unprep_clone(rq);
 
 	return -ENOMEM;

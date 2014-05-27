@@ -19,6 +19,7 @@
 #include <linux/radix-tree.h>
 #include <linux/buffer_head.h> /* invalidate_bh_lrus() */
 #include <linux/slab.h>
+#include <linux/dm-io.h>
 
 #include <asm/uaccess.h>
 
@@ -227,26 +228,61 @@ static void discard_from_brd(struct brd_device *brd,
 	}
 }
 
+static void print_hex(unsigned char *r_buf, unsigned int size)
+{
+        int j;
+
+        for(j = 0; j < size; j+=16) {
+                printk(KERN_INFO"0x%8x(%8d):%2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x\n", 0 + (j / 512), 0 + (j / 512),              
+                       r_buf[j],r_buf[j+1],r_buf[j+2],r_buf[j+3],
+                       r_buf[j+4],r_buf[j+5],r_buf[j+6],r_buf[j+7],
+                       r_buf[j+8],r_buf[j+9],r_buf[j+10],r_buf[j+11],
+                       r_buf[j+12],r_buf[j+13],r_buf[j+14],
+                       r_buf[j+15]
+                       );
+        }
+}
+
 /*
  * Copy n bytes from src to the brd starting at sector. Does not sleep.
  */
-static void copy_to_brd(struct brd_device *brd, const void *src,
+static void copy_to_brd(struct brd_device *brd, struct bio_vec *bvec, const void *src,
 			sector_t sector, size_t n)
 {
-	struct page *page;
-	void *dst;
-	unsigned int offset = (sector & (PAGE_SECTORS-1)) << SECTOR_SHIFT;
+        unsigned int bv_offset = bvec->bv_offset;
+        unsigned int rvec_count = bvec->rvec_count;
+	unsigned int sector_offset = (sector & (PAGE_SECTORS-1)) << SECTOR_SHIFT;
+        struct ram_vec *rvec = bvec->rvec;                
+        struct page *page;        
+	void *dst;        
+        int rvec_idx = 0;        
 	size_t copy;
 
-	copy = min_t(size_t, n, PAGE_SIZE - offset);
+        src += bv_offset;
+
+	copy = min_t(size_t, n, PAGE_SIZE - sector_offset);
 	page = brd_lookup_page(brd, sector);
 	BUG_ON(!page);
 
 	dst = kmap_atomic(page, KM_USER1);
-	memcpy(dst + offset, src, copy);
-	kunmap_atomic(dst, KM_USER1);
+
+        if(rvec_count) {
+                //                printk(KERN_INFO"rvec_count:%d, src offset:%d, dst offset:%d", rvec_count, rvec[rvec_idx].rv_offset + bv_offset, sector_offset + rvec[rvec_idx].rv_offset);
+                for(rvec_idx = 0; rvec_idx < rvec_count; rvec_idx++) {
+                        if(PAGE_SIZE - sector_offset < sector_offset + rvec[rvec_idx].rv_offset) {
+                                kunmap_atomic(dst, KM_USER1);
+                                goto get_next_page;
+                        }
+                        memcpy(dst + sector_offset + rvec[rvec_idx].rv_offset,
+                               src + rvec[rvec_idx].rv_offset, rvec[rvec_idx].rv_len);
+                }
+        } else
+                memcpy(dst + sector_offset, src, copy);                
+
+	kunmap_atomic(dst, KM_USER1);        
 
 	if (copy < n) {
+get_next_page:                
 		src += copy;
 		sector += copy >> SECTOR_SHIFT;
 		copy = n - copy;
@@ -254,7 +290,14 @@ static void copy_to_brd(struct brd_device *brd, const void *src,
 		BUG_ON(!page);
 
 		dst = kmap_atomic(page, KM_USER1);
-		memcpy(dst, src, copy);
+                if(rvec_count) {
+                        for(; rvec_idx < rvec_count; rvec_idx++) {
+                                memcpy(dst + sector_offset + rvec[rvec_idx].rv_offset,
+                                       src + rvec[rvec_idx].rv_offset, rvec[rvec_idx].rv_len);
+                        }
+                } else
+                        memcpy(dst, src, copy);
+                
 		kunmap_atomic(dst, KM_USER1);
 	}
 }
@@ -262,19 +305,39 @@ static void copy_to_brd(struct brd_device *brd, const void *src,
 /*
  * Copy n bytes to dst from the brd starting at sector. Does not sleep.
  */
-static void copy_from_brd(void *dst, struct brd_device *brd,
-			sector_t sector, size_t n)
+static void copy_from_brd(struct brd_device *brd, struct bio_vec *bvec, void *dst,
+                          sector_t sector, size_t n)
 {
-	struct page *page;
+        unsigned int bv_offset = bvec->bv_offset;
+        unsigned int rvec_count = bvec->rvec_count;
+	unsigned int sector_offset = (sector & (PAGE_SECTORS-1)) << SECTOR_SHIFT;
+        struct ram_vec *rvec = bvec->rvec;        
+	struct page *page;        
+        int rvec_idx;
 	void *src;
-	unsigned int offset = (sector & (PAGE_SECTORS-1)) << SECTOR_SHIFT;
 	size_t copy;
 
-	copy = min_t(size_t, n, PAGE_SIZE - offset);
+        dst += bv_offset;
+
+	copy = min_t(size_t, n, PAGE_SIZE - sector_offset);
 	page = brd_lookup_page(brd, sector);
 	if (page) {
 		src = kmap_atomic(page, KM_USER1);
-		memcpy(dst, src + offset, copy);
+                if(rvec_count) {
+                        printk(KERN_INFO"%s %d, rvec_count:%d\n", __FUNCTION__, __LINE__, rvec_count);
+                        for(rvec_idx = 0; rvec_idx < rvec_count; rvec_idx++) {
+                                if(PAGE_SIZE - sector_offset < sector_offset + rvec[rvec_idx].rv_offset) {
+                                        kunmap_atomic(src, KM_USER1);                                        
+                                        break;
+                                }
+                                memcpy(dst + rvec[rvec_idx].rv_offset,
+                                       src + sector_offset + rvec[rvec_idx].rv_offset, rvec[rvec_idx].rv_len);
+                        }
+                } else
+                        memcpy(dst, src + sector_offset, copy);
+                
+                if(sector == 2048)
+                        printk(KERN_INFO"page phys:%x,read segid:%lld",(unsigned int)page_to_phys(page), *(unsigned long long *)(src+sector_offset));                
 		kunmap_atomic(src, KM_USER1);
 	} else
 		memset(dst, 0, copy);
@@ -284,9 +347,15 @@ static void copy_from_brd(void *dst, struct brd_device *brd,
 		sector += copy >> SECTOR_SHIFT;
 		copy = n - copy;
 		page = brd_lookup_page(brd, sector);
+                
 		if (page) {
 			src = kmap_atomic(page, KM_USER1);
-			memcpy(dst, src, copy);
+                        if(rvec_count) {
+                                for(; rvec_idx < rvec_count; rvec_idx++) 
+                                        memcpy(dst + rvec[rvec_idx].rv_offset,
+                                               src + sector_offset + rvec[rvec_idx].rv_offset, rvec[rvec_idx].rv_len);
+                        } else
+                                memcpy(dst, src, copy);
 			kunmap_atomic(src, KM_USER1);
 		} else
 			memset(dst, 0, copy);
@@ -296,11 +365,11 @@ static void copy_from_brd(void *dst, struct brd_device *brd,
 /*
  * Process a single bvec of a bio.
  */
-static int brd_do_bvec(struct brd_device *brd, struct page *page,
-			unsigned int len, unsigned int off, int rw,
-			sector_t sector)
+static int brd_do_bvec(struct brd_device *brd, struct bio_vec *bvec, int rw, sector_t sector)
 {
 	void *mem;
+        unsigned int len = bvec->bv_len;
+        struct page *page = bvec->bv_page;
 	int err = 0;
 
 	if (rw != READ) {
@@ -308,14 +377,14 @@ static int brd_do_bvec(struct brd_device *brd, struct page *page,
 		if (err)
 			goto out;
 	}
-
 	mem = kmap_atomic(page, KM_USER0);
+
 	if (rw == READ) {
-		copy_from_brd(mem + off, brd, sector, len);
+		copy_from_brd(brd, bvec, mem, sector, len);
 		flush_dcache_page(page);
 	} else {
 		flush_dcache_page(page);
-		copy_to_brd(brd, mem + off, sector, len);
+		copy_to_brd(brd, bvec, mem, sector,len);
 	}
 	kunmap_atomic(mem, KM_USER0);
 
@@ -349,9 +418,14 @@ static int brd_make_request(struct request_queue *q, struct bio *bio)
 		rw = READ;
 
 	bio_for_each_segment(bvec, bio, i) {
-		unsigned int len = bvec->bv_len;
-		err = brd_do_bvec(brd, bvec->bv_page, len,
-					bvec->bv_offset, rw, sector);
+                unsigned int len = bvec->bv_len;
+                if(bvec->bv_len < PAGE_SIZE) {
+                        //                        printk(KERN_INFO"%s:sector:%lld, offset:%d,bvlen:%d", __FUNCTION__, sector, bvec->bv_offset, bvec->bv_len);
+                        
+                }                
+                //		err = brd_do_bvec(brd, bvec->bv_page, len,
+                //					bvec->bv_offset, rw, sector);
+		err = brd_do_bvec(brd, bvec, rw, sector);                
 		if (err)
 			break;
 		sector += len >> SECTOR_SHIFT;
@@ -560,7 +634,7 @@ static int __init brd_init(void)
 {
 	int i, nr;
 	unsigned long range;
-	struct brd_device *brd, *next;
+	struct brd_device *brd = NULL, *next;
 
 	/*
 	 * brd module now has a feature to instantiate underlying device
@@ -615,6 +689,14 @@ static int __init brd_init(void)
 			goto out_free;
 		list_add_tail(&brd->brd_list, &brd_devices);
 	}
+        {
+
+                struct gendisk *disk;
+                sector_t size = 524288;
+                printk(KERN_INFO"md-ramdisk:ram%d, size:%d", nr-1, 0x8000000);                
+                disk = brd->brd_disk;
+                set_capacity(disk, size);                
+        }        
 
 	/* point of no return */
 
