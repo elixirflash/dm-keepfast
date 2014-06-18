@@ -11,7 +11,7 @@
 #include "dm-keepfast-metadata.h"
 #include "dm-keepfast-daemon.h"
 
-int kf_debug = 0;
+int kf_debug = 1;
 
 /* SYSFS */
 static ssize_t cache_stats_show(struct device *dev,
@@ -46,11 +46,15 @@ static ssize_t cache_stats_show(struct device *dev,
         u64 inv = atomic64_read(&cache->op_stat[STAT_OP_INV]);
         u64 flush = atomic64_read(&cache->op_stat[STAT_OP_FLUSH]);
 
+        u32 caches = cache->nr_caches;
+        u32 segs = cache->nr_segments;
+
         u32 hit_rate = (u32)((hit_write + hit_read) / 8) / (u32)((hit_write + hit_read + miss_write + miss_read + bypass) / 8) * 100;
 
         lap = cpu_to_le32(calc_segment_lap(cache, current_seg->global_id));
 
         return snprintf(page, PAGE_SIZE,
+                        "total segs    : %10d, segs"
                         "current seg   : %10lld, lap:%10d\n"
                         "caching segs  : %10d segments(last filled:%10lld, Last flushed:%10lld)\n"
                         "cache hit rate: %10d  \n"
@@ -62,7 +66,7 @@ static ssize_t cache_stats_show(struct device *dev,
                         "invalidate    : %10lld sectors\n"
                         "flush         : %10lld sectors\n"
                         "8 sectors per cacheline(4k)\n",
-                        current_seg->global_id, lap,
+                        segs, current_seg->global_id, lap,
                         caching_segs, lfilled, lflushed, hit_rate, bypass,
                         hit_read, hit_read_full, hit_read_partial,
                         hit_write, hit_write_full, hit_write_partial,
@@ -175,13 +179,6 @@ static u8 count_dirty_caches_remained(struct segment_header *seg)
 			count++;
 	}
 	return count;
-}
-
-static void prepare_meta_rambuffer(void *rambuffer,
-				   struct wb_cache *cache,
-				   struct segment_header *seg)
-{
-	prepare_segment_header_device(rambuffer, cache, seg);
 }
 
 static void refresh_current_segment(struct wb_cache *cache)
@@ -458,6 +455,8 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 	struct lookup_key key;
 	struct ht_head *head;
 	u32 update_mb_idx;
+        u32 overwrite = 0;
+        u32 mb_idx = 0;
 
 	struct wb_device *wb = ti->private;
 	struct wb_cache *cache = wb->cache;
@@ -519,7 +518,6 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
                         return DM_MAPIO_REMAPPED;                       
                 }
                 } */
-
 	bio_count = bio->bi_size >> SECTOR_SHIFT;
 	bio_fullsize = (bio_count == (1 << 3));
 	div_u64_rem(bio->bi_sector, 1 << 3, &tmp32);
@@ -551,8 +549,8 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 	mutex_lock(&cache->io_lock);
 	mb = ht_lookup(cache, head, &key);
 	if (mb) {
-		div_u64_rem(mb->idx, cache->nr_caches_inseg, &tmp32);
-		seg = ((void *) mb) - tmp32 * sizeof(struct metablock)
+		div_u64_rem(mb->idx, cache->nr_caches_inseg, &mb_idx);
+		seg = ((void *) mb) - mb_idx * sizeof(struct metablock)
 				    - sizeof(struct segment_header);
 		atomic_inc(&seg->nr_inflight_ios);
 	}
@@ -603,8 +601,10 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 			migrate_mb(cache, seg, mb, dirty_bits, true);
                         inc_op_stat(cache, STAT_OP_INV, dirty_bits);                                                
 			cleanup_mb_if_dirty(cache, seg, mb);
-
 			atomic_dec(&seg->nr_inflight_ios);
+
+                        list_add_tail(&mb->inv_list, &cache->inv_queue);
+                        
 			bio_remap(bio, orig, bio->bi_sector);
 		}
 		return DM_MAPIO_REMAPPED;
@@ -619,6 +619,8 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
                  */
                 bool needs_cleanup_prev_cache =
                         !bio_fullsize || !(dirty_bits == 255);
+
+                overwrite = true;
 
                 /*
                  * Migration works in background
@@ -639,11 +641,19 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
                  * can be discarded without migration.
                  */
                 cleanup_mb_if_dirty(cache, seg, mb);
-
-                ht_del(cache, mb);
-
-                atomic_dec(&seg->nr_inflight_ios);
+                goto write_on;
         }
+                
+        if (!list_empty(&cache->inv_queue)) {
+                mb = list_entry(cache->inv_queue.next, struct metablock, inv_list);
+                list_del(&mb->inv_list);
+		div_u64_rem(mb->idx, cache->nr_caches_inseg, &mb_idx);
+		seg = ((void *) mb) - mb_idx * sizeof(struct metablock)
+				    - sizeof(struct segment_header);
+		atomic_inc(&seg->nr_inflight_ios);
+                goto write_on;
+        }
+        
 
         //GET NEWMB
 	/*
@@ -654,18 +664,19 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 	 */
 	div_u64_rem(cache->cursor + 1 , cache->nr_caches_inseg, &tmp32);
         refresh_segment = !tmp32;
-        cache->last_mb_in_segment = !tmp32;        
+        seg->last_mb_in_segment = !tmp32;        
 
         //	div_u64_rem(cache->cursor + 2, cache->nr_caches_inseg, &tmp32);
         //        cache->last_mb_in_segment = !tmp32;
-        
+
 	/*
 	 * update_mb_idx is the cache line index to update.
 	 */
+
         spin_lock_irqsave(&cache->cursor_lock, flags);
         update_mb_idx = cache->cursor;
         spin_unlock_irqrestore(&cache->cursor_lock, flags);        
-        
+
         lockseg(cache->current_seg, flags);                
 	seg = cache->current_seg;
         unlockseg(cache->current_seg, flags);        
@@ -677,23 +688,22 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 	div_u64_rem(cache->cursor + 1, cache->nr_caches, &tmp32);
 	cache->cursor = tmp32; // cursor is indicating the empty point.
         spin_unlock_irqrestore(&cache->cursor_lock, flags);
-        
+
 	atomic_inc(&seg->nr_inflight_ios);
-	div_u64_rem(update_mb_idx, cache->nr_caches_inseg, &tmp32);
-	new_mb = seg->mb_array + tmp32;
+	div_u64_rem(update_mb_idx, cache->nr_caches_inseg, &mb_idx);
+	new_mb = seg->mb_array + mb_idx;
 	new_mb->dirty_bits = 0;
 	ht_register(cache, head, &key, new_mb);
 
-	mutex_unlock(&cache->io_lock);
-
 	mb = new_mb;
 
-        //write on cur seg        
-
+        //write on cur seg
+write_on:
+	mutex_unlock(&cache->io_lock);
+        
 	b = false;
-
         lockseg(seg, flags);
-	if (!mb->dirty_bits) {
+	if (!mb->dirty_bits && !overwrite) {
 		seg->length++;
 		BUG_ON(seg->length > cache->nr_caches_inseg);
 		b = true;
@@ -720,7 +730,7 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 		struct dm_io_region region_w;
                 int rvec_idx = 0;
 
-                prepare_segment_header_device(buf, cache, seg);
+                prepare_segment_header_device(buf, cache, seg, mb_idx);
 
 		io_req_w = (struct dm_io_request) {
 			.client = wb_io_client,
@@ -737,7 +747,7 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 		};
 
                 region_w.rvec =  mempool_alloc(cache->buf_8_pool, GFP_NOIO);
-#if 1
+#if 0
                 if(seg->length == 1) {
                         region_w.rvec_count = 2;
                         region_w.rvec[rvec_idx].rv_offset = 0;
@@ -746,7 +756,7 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
                 } else
                         region_w.rvec_count = 1;
 
-                region_w.rvec[rvec_idx].rv_offset = 512 + sizeof(struct metablock_device) * (seg->length - 1);
+                region_w.rvec[rvec_idx].rv_offset = 512 + sizeof(struct metablock_device) * mb_idx;
 
                 region_w.rvec[rvec_idx].rv_len = sizeof(struct metablock_device);
 #endif
@@ -796,8 +806,8 @@ static int keepfast_end_io(struct dm_target *ti, struct bio *bio, int error)
                 
 	atomic_dec(&seg->nr_inflight_ios);
 
-        if(cache->last_mb_in_segment) {
-                cache->last_mb_in_segment = 0;
+        if(seg->last_mb_in_segment) {
+                seg->last_mb_in_segment = 0;
 		atomic64_set(&cache->last_fulled_segment_id, seg->global_id);
         }
 
@@ -842,8 +852,8 @@ static int keepfast_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	 * storage should keep its disk util less
 	 * than 70%.
 	 */
-        wb->high_migrate_threshold = 75;
-	wb->low_migrate_threshold = 35;        
+        wb->high_migrate_threshold = 90;
+	wb->low_migrate_threshold = 70;        
 
 	init_waitqueue_head(&wb->blockup_wait_queue);
 	wb->blockup = false;
@@ -856,6 +866,8 @@ static int keepfast_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	}
 	wb->cache = cache;
 	wb->cache->wb = wb;
+
+        INIT_LIST_HEAD(&cache->inv_queue);        
 
 	r = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table),
 			  &origdev);

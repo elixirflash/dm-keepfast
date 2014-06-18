@@ -457,8 +457,9 @@ struct format_segmd_context {
 static void format_segmd_endio(unsigned long error, void *__context)
 {
 	struct format_segmd_context *context = __context;
-	if (error)
+	if (error) {
 		context->err = 1;
+        }
 	atomic64_dec(&context->count);
 }
 
@@ -514,6 +515,7 @@ int __must_check format_cache_device(struct dm_dev *dev, struct wb_cache *cache)
 	/*
 	 * Count the number of segments
 	 */
+
 	atomic64_set(&context.count, nr_segments);
 	context.err = 0;
 
@@ -531,8 +533,9 @@ int __must_check format_cache_device(struct dm_dev *dev, struct wb_cache *cache)
 			.client = wb_io_client,
 			.bi_rw = WRITE_FUA,
                         .notify.fn = NULL,
-                        //			.notify.fn = format_segmd_endio,
-                        //			.notify.context = &context,
+                        //there is a bug that could not write at last area
+                        //                        .notify.fn = format_segmd_endio,
+                        //                        .notify.context = &context,
 			.mem.type = DM_IO_KMEM,
 			.mem.ptr.addr = buf,
 		};
@@ -549,6 +552,8 @@ int __must_check format_cache_device(struct dm_dev *dev, struct wb_cache *cache)
 		}
 	}
 	kfree(buf);
+
+        kfdebug("nrsegs:%d, i:%d,remained segs:%lld",nr_segments, i,  atomic64_read(&context.count));
 
 	if (r) {
 		KFERR();
@@ -662,34 +667,40 @@ bad_io:
  */
 void prepare_segment_header_device(struct segment_header_device *dest,
 				   struct wb_cache *cache,
-				   struct segment_header *src)
+				   struct segment_header *src,
+                                   u32 mb_idx)
 {
 	u8 left, right;
 	u32 i, tmp32;
 	unsigned long flags;
         u32 cursor, length;
-        struct metablock_device *mbdev;
+        struct metablock_device *mbdev = NULL;
         struct metablock *mb;        
 
 	dest->global_id = cpu_to_le64(src->global_id);
-
-	/* just a tiny validation */
-        lockseg(src, flags);                                
-	left = src->length - 1;
-	div_u64_rem(cache->cursor, cache->nr_caches_inseg, &tmp32);
-        unlockseg(src, flags);        
-	right = tmp32; 
-
-        i = left;
+#if 0
+	for (i = 0; i < src->length; i++) {        
+                mb = src->mb_array + i;
+                mbdev = &dest->mbarr[i];
         
-        mb = src->mb_array + i;
-        mbdev = &dest->mbarr[i];
-        
+                mbdev->sector = cpu_to_le64(mb->sector);
+                mbdev->dirty_bits = mb->dirty_bits;
+                mbdev->lap = cpu_to_le32(calc_segment_lap(cache, src->global_id));
+        }
+        if(i <= src->length) {
+                mb = src->mb_array + i;
+                mbdev = &dest->mbarr[i];
+                mbdev->lap = cpu_to_le32(calc_segment_lap(cache, src->global_id)) + 1;
+        }
+#else
+        mb = src->mb_array + mb_idx;
+        mbdev = &dest->mbarr[mb_idx];
         mbdev->sector = cpu_to_le64(mb->sector);
         mbdev->dirty_bits = mb->dirty_bits;
-        mbdev->lap = cpu_to_le32(calc_segment_lap(cache, src->global_id)) + (src->length - 1);
-
-        kfdebug("gid:%lld,seglap:%d,mbdev->lap:%d, srclength:%d,dirtybits:%x", dest->global_id, cpu_to_le32(calc_segment_lap(cache, src->global_id)), mbdev->lap, src->length, mbdev->dirty_bits);        
+        mbdev->lap = cpu_to_le32(calc_segment_lap(cache, src->global_id));                
+#endif
+        
+        kfdebug("gid:%lld,seglap:%d,mbdev->lap:%d, mbidx:%d, srclength:%d,dirtybits:%x", dest->global_id, cpu_to_le32(calc_segment_lap(cache, src->global_id)), mbdev->lap, mb_idx , src->length, mbdev->dirty_bits);        
 }
 
 /*
@@ -714,7 +725,7 @@ static void update_by_segment_header_device(struct wb_cache *cache,
 		struct metablock *found, *mb = seg->mb_array + i;
 		struct metablock_device *mbdev = &src->mbarr[i];
 
-                mb_lap = seg_lap + i;
+                mb_lap = seg_lap;
 
 		/*
 		 * lap is kind of checksum.
@@ -740,7 +751,7 @@ static void update_by_segment_header_device(struct wb_cache *cache,
 		 * the buffer.
 		 */
 		if (le32_to_cpu(mbdev->lap) > mb_lap) {
-                        KFERR("mb-lap error");
+                        KFERR("Invalid  mb-lap:%d with seglap:%d", le32_to_cpu(mbdev->lap), mb_lap);
 			break;
                 }
                 
@@ -773,7 +784,8 @@ static void update_by_segment_header_device(struct wb_cache *cache,
 		found = ht_lookup(cache, head, &key);
 		if (found)
 			ht_del(cache, found);
-
+                kfdebug("recover - segid:%lld, seglap:%d,  mbidx:%d, mdevlap:%d",
+                        id, seg_lap, i, le32_to_cpu(mbdev->lap));  
                 ht_register(cache, head, &key, mb);
 	}
 }

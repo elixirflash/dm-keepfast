@@ -377,7 +377,7 @@ int modulator_proc(void *data)
   
                 used = (nr_mig_candidates * 100) / cache->nr_segments;
                 
-                kfdebug("used:%d threshold:high(%u)low(%u), candidates%d, nrsegs:%d", used, wb->high_migrate_threshold,wb->low_migrate_threshold, nr_mig_candidates, cache->nr_segments);
+                //                kfdebug("used:%d threshold:high(%u)low(%u), candidates%d, nrsegs:%d", used, wb->high_migrate_threshold,wb->low_migrate_threshold, nr_mig_candidates, cache->nr_segments);
 
 		if (used >=  ACCESS_ONCE(wb->high_migrate_threshold))
 			cache->allow_migrate = true;

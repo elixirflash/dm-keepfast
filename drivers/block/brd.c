@@ -692,7 +692,7 @@ static int __init brd_init(void)
         {
 
                 struct gendisk *disk;
-                sector_t size = 524288;
+                sector_t size = 1048576;
                 printk(KERN_INFO"md-ramdisk:ram%d, size:%d", nr-1, 0x8000000);                
                 disk = brd->brd_disk;
                 set_capacity(disk, size);                

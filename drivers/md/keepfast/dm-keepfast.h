@@ -93,6 +93,7 @@ struct metablock {
 	u32 idx; /* Const */
 
 	struct hlist_node ht_list;
+        struct list_head inv_list;
 
 	/*
 	 * 8 bit flag for dirtiness
@@ -144,6 +145,8 @@ struct segment_header {
 	sector_t start_sector; /* Const */
 
 	struct list_head migrate_list;
+
+        bool last_mb_in_segment;        
 
 	/*
 	 * This segment can not be migrated
@@ -253,7 +256,6 @@ struct wb_cache {
 	u32 cursor; /* Index that has been written the most lately */
 	spinlock_t cursor_lock;        
 	struct segment_header *current_seg;
-        bool last_mb_in_segment;
 
 	struct rambuffer *current_rambuf;
 	u32 rambuf_pool_amount; /* kB */
@@ -274,6 +276,8 @@ struct wb_cache {
 	struct task_struct *flush_daemon;
 	spinlock_t flush_queue_lock;
 	struct list_head flush_queue;
+
+	struct list_head inv_queue;        
 
 	/*
 	 * Deferred ACK for barriers.
