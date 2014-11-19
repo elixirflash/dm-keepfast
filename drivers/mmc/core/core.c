@@ -39,6 +39,11 @@
 #include "sd_ops.h"
 #include "sdio_ops.h"
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/mmc.h>
+
+EXPORT_TRACEPOINT_SYMBOL(mmc_cmd_latency);
+
 /* yongja */
 #ifdef	CONFIG_MMC_MEM_LOG
 #include <linux/mmc/mem_log.h>
@@ -114,7 +119,9 @@ void mmc_request_done(struct mmc_host *host, struct mmc_request *mrq)
 		cmd->error = 0;
 		host->ops->request(host, mrq);
 	} else {
+                trace_mmc_cmd_latency(host, mrq);
 #ifdef CONFIG_MEM_LOG_TRACE
+
 		memlog_mmc_request_done(mrq, host);
 #endif	
 		led_trigger_event(host->led, LED_OFF);
@@ -155,6 +162,7 @@ mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 	struct scatterlist *sg;
 #endif
 
+        __trace_mmc_cmd_start(mrq);
 	pr_debug("%s: starting CMD%u arg %08x flags %08x\n",
 		 mmc_hostname(host), mrq->cmd->opcode,
 		 mrq->cmd->arg, mrq->cmd->flags);

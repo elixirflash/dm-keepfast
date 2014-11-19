@@ -95,6 +95,7 @@ struct mmc_command {
  */
 
 	unsigned int		cmd_timeout_ms;	/* in milliseconds */
+        unsigned long long      start_time;
 
 	struct mmc_data		*data;		/* data segment associated with cmd */
 	struct mmc_request	*mrq;		/* associated request */
