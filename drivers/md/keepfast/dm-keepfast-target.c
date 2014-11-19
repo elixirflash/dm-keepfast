@@ -11,7 +11,13 @@
 #include "dm-keepfast-metadata.h"
 #include "dm-keepfast-daemon.h"
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/keepfast.h>
+
+EXPORT_TRACEPOINT_SYMBOL(keepfast_op);
+
 int kf_debug = 1;
+
 
 /* SYSFS */
 static ssize_t cache_stats_show(struct device *dev,
@@ -175,8 +181,9 @@ static u8 count_dirty_caches_remained(struct segment_header *seg)
 	struct metablock *mb;
 	for (i = 0; i < seg->length; i++) {
 		mb = seg->mb_array + i;
-		if (mb->dirty_bits)
+		if (mb->dirty_bits) {
 			count++;
+                }
 	}
 	return count;
 }
@@ -233,7 +240,7 @@ static void refresh_current_segment(struct wb_cache *cache)
         spin_lock_irqsave(&cache->cursor_lock, flags);
 	cache->cursor = current_seg->start_idx + (cache->nr_caches_inseg - 1);
         spin_unlock_irqrestore(&cache->cursor_lock, flags);
-        
+
 	lockseg(new_seg, flags);                        
 	new_seg->length = 0;
         unlockseg(new_seg, flags);        
@@ -261,6 +268,7 @@ void cleanup_mb_if_dirty(struct wb_cache *cache,
 	unsigned long flags;
 
 	bool b = false;
+
 	lockseg(seg, flags);
 	if (mb->dirty_bits) {
 		mb->dirty_bits = 0;
@@ -493,7 +501,7 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 	 */
 	if (bio->bi_rw & REQ_FLUSH) {
 		BUG_ON(bio->bi_size);
-                bio_remap(bio, orig, bio->bi_sector);                
+                bio_remap(bio, orig, bio->bi_sector);
 		return DM_MAPIO_REMAPPED;
         }
 
@@ -560,7 +568,7 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 	if (found)
 		on_curseg = is_on_curseg(cache, mb->idx);
 
-	inc_stat(cache, rw, found, bio_fullsize);
+	inc_stat(cache, rw, found, bio_count);
 
         //        kfdebug("cache stat:RM:%d, WM:%d, RH:%d, WH:%d", (int)cache->stat[0], (unsigned int)cache->stat[1], (unsigned int)cache->stat[2], (unsigned int)cache->stat[3]);
 
@@ -582,8 +590,10 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 				  calc_mb_start_sector(cache, seg, mb->idx)
 				  + bio_offset);
 			map_context->ptr = seg;
+                        //TRACING
+                        mb->rhits++;
+                        trace_keepfast_op(seg, mb, STAT_OP_READ);
 		} else {
-
 			/*
 			 * (Locking)
 			 * Dirtiness of a stable cache
@@ -599,11 +609,14 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 			 * doesn't craze the cache concistency.
 			 */
 			migrate_mb(cache, seg, mb, dirty_bits, true);
-                        inc_op_stat(cache, STAT_OP_INV, dirty_bits);                                                
+                        inc_op_stat(cache, STAT_OP_INV, dirty_bits);
+                        //TRACING
+                        trace_keepfast_op(seg, mb, STAT_OP_INV);
 			cleanup_mb_if_dirty(cache, seg, mb);
 			atomic_dec(&seg->nr_inflight_ios);
-
+#ifdef OVERWRITE_ON_HIT                
                         list_add_tail(&mb->inv_list, &cache->inv_queue);
+#endif
                         
 			bio_remap(bio, orig, bio->bi_sector);
 		}
@@ -620,8 +633,9 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
                 bool needs_cleanup_prev_cache =
                         !bio_fullsize || !(dirty_bits == 255);
 
+#ifdef OVERWRITE_ON_HIT
                 overwrite = true;
-
+#endif
                 /*
                  * Migration works in background
                  * and may have cleaned up the metablock.
@@ -632,18 +646,29 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 
                 if (unlikely(needs_cleanup_prev_cache)) {
                         //                        wait_for_completion(&seg->flush_done);
-                        inc_op_stat(cache, STAT_OP_INV, dirty_bits);                                                
+                        inc_op_stat(cache, STAT_OP_INV, dirty_bits);
+                        //TRACEING
+                        trace_keepfast_op(seg, mb, STAT_OP_INV);
                         migrate_mb(cache, seg, mb, dirty_bits, true);
-                }
+                } else
+                        mb->whits++;
 
                 /*
                  * Fullsize dirty cache
                  * can be discarded without migration.
                  */
+#ifndef OVERWRITE_ON_HIT
+                ht_del(cache, mb);
+
+                atomic_dec(&seg->nr_inflight_ios);
+#endif
                 cleanup_mb_if_dirty(cache, seg, mb);
+
+#ifdef OVERWRITE_ON_HIT
                 goto write_on;
+#endif
         }
-                
+#ifdef OVERWRITE_ON_HIT
         if (!list_empty(&cache->inv_queue)) {
                 mb = list_entry(cache->inv_queue.next, struct metablock, inv_list);
                 list_del(&mb->inv_list);
@@ -651,9 +676,14 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 		seg = ((void *) mb) - mb_idx * sizeof(struct metablock)
 				    - sizeof(struct segment_header);
 		atomic_inc(&seg->nr_inflight_ios);
+
                 goto write_on;
         }
-        
+#endif
+
+        lockseg(cache->current_seg, flags);
+	seg = cache->current_seg;
+        unlockseg(cache->current_seg, flags);
 
         //GET NEWMB
 	/*
@@ -663,8 +693,7 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 	 * get the new one.
 	 */
 	div_u64_rem(cache->cursor + 1 , cache->nr_caches_inseg, &tmp32);
-        refresh_segment = !tmp32;
-        seg->last_mb_in_segment = !tmp32;        
+        seg->last_mb_in_segment = refresh_segment = !tmp32;
 
         //	div_u64_rem(cache->cursor + 2, cache->nr_caches_inseg, &tmp32);
         //        cache->last_mb_in_segment = !tmp32;
@@ -672,14 +701,9 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 	/*
 	 * update_mb_idx is the cache line index to update.
 	 */
-
         spin_lock_irqsave(&cache->cursor_lock, flags);
         update_mb_idx = cache->cursor;
         spin_unlock_irqrestore(&cache->cursor_lock, flags);        
-
-        lockseg(cache->current_seg, flags);                
-	seg = cache->current_seg;
-        unlockseg(cache->current_seg, flags);        
 
 	if(refresh_segment)  
                 refresh_current_segment(cache);
@@ -693,6 +717,7 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 	div_u64_rem(update_mb_idx, cache->nr_caches_inseg, &mb_idx);
 	new_mb = seg->mb_array + mb_idx;
 	new_mb->dirty_bits = 0;
+
 	ht_register(cache, head, &key, new_mb);
 
 	mb = new_mb;
@@ -702,13 +727,14 @@ write_on:
 	mutex_unlock(&cache->io_lock);
         
 	b = false;
+
         lockseg(seg, flags);
 	if (!mb->dirty_bits && !overwrite) {
 		seg->length++;
 		BUG_ON(seg->length > cache->nr_caches_inseg);
 		b = true;
 	}
-        
+
 	if (likely(bio_fullsize)) {
 		mb->dirty_bits = 255;
 	} else {
@@ -730,7 +756,7 @@ write_on:
 		struct dm_io_region region_w;
                 int rvec_idx = 0;
 
-                prepare_segment_header_device(buf, cache, seg, mb_idx);
+                prepare_segment_header_device(buf, cache, seg, mb_idx, overwrite);
 
 		io_req_w = (struct dm_io_request) {
 			.client = wb_io_client,
@@ -745,9 +771,8 @@ write_on:
 			.count = (1 << 3),
                         .rvec_count = 0,
 		};
-
+#ifdef RAM_RW_BYTEALIGN
                 region_w.rvec =  mempool_alloc(cache->buf_8_pool, GFP_NOIO);
-#if 0
                 if(seg->length == 1) {
                         region_w.rvec_count = 2;
                         region_w.rvec[rvec_idx].rv_offset = 0;
@@ -757,7 +782,6 @@ write_on:
                         region_w.rvec_count = 1;
 
                 region_w.rvec[rvec_idx].rv_offset = 512 + sizeof(struct metablock_device) * mb_idx;
-
                 region_w.rvec[rvec_idx].rv_len = sizeof(struct metablock_device);
 #endif
                 RETRY(dm_safe_io(&io_req_w, 1, &region_w, NULL, true));
@@ -774,6 +798,7 @@ write_on:
                   calc_mb_start_sector(cache, seg, mb->idx)
                   + bio_offset);
 
+        trace_keepfast_op(seg, mb, STAT_OP_WRITE);
         map_context->ptr = seg;
 
         /*        kfdebug("inflight ios:%d, remap to cache, mb idx:%d, LM:%lld, LF:%lldi SID:%lld, cursor:%d",
@@ -853,7 +878,7 @@ static int keepfast_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	 * than 70%.
 	 */
         wb->high_migrate_threshold = 90;
-	wb->low_migrate_threshold = 70;        
+	wb->low_migrate_threshold = 70;
 
 	init_waitqueue_head(&wb->blockup_wait_queue);
 	wb->blockup = false;

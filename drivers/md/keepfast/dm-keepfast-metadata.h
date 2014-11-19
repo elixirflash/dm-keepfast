@@ -36,7 +36,9 @@ int __must_check format_cache_device(struct dm_dev *, struct wb_cache *);
 void prepare_segment_header_device(struct segment_header_device *dest,
 				   struct wb_cache *,
 				   struct segment_header *src,
-                                   u32 mb_idx);
+                                   u32 mb_idx,
+                                   int overwrite
+                                   );
 
 /*----------------------------------------------------------------*/
 

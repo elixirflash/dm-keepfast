@@ -27,6 +27,9 @@
 
 extern int kf_debug;
 
+#define OVERWRITE_ON_HIT
+#define RAM_RW_BYTEALIGN
+
 #define kfdebug(f, args...) \
         if(kf_debug)        \
                 DMINFO("debug@%s() L.%d" f, __func__, __LINE__, ## args)
@@ -91,6 +94,9 @@ struct metablock {
 	sector_t sector; /* key */
 
 	u32 idx; /* Const */
+
+        u32 rhits;
+        u32 whits;
 
 	struct hlist_node ht_list;
         struct list_head inv_list;
@@ -203,10 +209,12 @@ struct rambuffer {
 	struct completion done;
 };
 
-#define STAT_OP_FLUSH       0
-#define STAT_OP_INV         1
-#define STAT_OP_BYPASS      2
-#define STAT_OP_LEN         3
+#define STAT_OP_READ        0
+#define STAT_OP_WRITE       1
+#define STAT_OP_FLUSH       2
+#define STAT_OP_INV         3
+#define STAT_OP_BYPASS      4
+#define STAT_OP_LEN         5
 
 enum STATFLAG {
 	STAT_HIT = 0,        

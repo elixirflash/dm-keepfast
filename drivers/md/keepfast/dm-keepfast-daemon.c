@@ -8,6 +8,9 @@
 #include "dm-keepfast-metadata.h"
 #include "dm-keepfast-daemon.h"
 
+
+#include <trace/events/keepfast.h>
+
 /*----------------------------------------------------------------*/
 
 static void migrate_endio(unsigned long error, void *context)
@@ -95,7 +98,8 @@ static void submit_migrate_io(struct wb_cache *cache,
 				RETRY(dm_safe_io(&io_req_w, 1, &region_w, NULL, false));
 			}
 		}
-                inc_op_stat(cache, STAT_OP_FLUSH, dirty_bits);                
+                inc_op_stat(cache, STAT_OP_FLUSH, dirty_bits);
+                trace_keepfast_op(seg, mb, STAT_OP_FLUSH);
 	}
 }
 
@@ -210,6 +214,7 @@ migrate_write:
 
 	list_for_each_entry(seg, &cache->migrate_list, migrate_list) {
 		cleanup_segment(cache, seg);
+                discard_caches_inseg(cache, seg);
 	}
 
 	/*

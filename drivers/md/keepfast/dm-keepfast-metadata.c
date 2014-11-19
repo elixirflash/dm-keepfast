@@ -8,7 +8,7 @@
 #include "dm-keepfast-metadata.h"
 #include "dm-keepfast-daemon.h"
 
-/*----------------------------------------------------------------*/
+#include <trace/events/keepfast.h>
 
 struct part {
 	void *memory;
@@ -668,7 +668,7 @@ bad_io:
 void prepare_segment_header_device(struct segment_header_device *dest,
 				   struct wb_cache *cache,
 				   struct segment_header *src,
-                                   u32 mb_idx)
+                                   u32 mb_idx, int overwrite)
 {
 	u8 left, right;
 	u32 i, tmp32;
@@ -678,11 +678,10 @@ void prepare_segment_header_device(struct segment_header_device *dest,
         struct metablock *mb;        
 
 	dest->global_id = cpu_to_le64(src->global_id);
-#if 0
+#ifndef RAM_RW_BYTEALIGN
 	for (i = 0; i < src->length; i++) {        
                 mb = src->mb_array + i;
                 mbdev = &dest->mbarr[i];
-        
                 mbdev->sector = cpu_to_le64(mb->sector);
                 mbdev->dirty_bits = mb->dirty_bits;
                 mbdev->lap = cpu_to_le32(calc_segment_lap(cache, src->global_id));
@@ -692,15 +691,14 @@ void prepare_segment_header_device(struct segment_header_device *dest,
                 mbdev = &dest->mbarr[i];
                 mbdev->lap = cpu_to_le32(calc_segment_lap(cache, src->global_id)) + 1;
         }
+
 #else
         mb = src->mb_array + mb_idx;
         mbdev = &dest->mbarr[mb_idx];
         mbdev->sector = cpu_to_le64(mb->sector);
         mbdev->dirty_bits = mb->dirty_bits;
-        mbdev->lap = cpu_to_le32(calc_segment_lap(cache, src->global_id));                
+        mbdev->lap = cpu_to_le32(calc_segment_lap(cache, src->global_id));
 #endif
-        
-        kfdebug("gid:%lld,seglap:%d,mbdev->lap:%d, mbidx:%d, srclength:%d,dirtybits:%x", dest->global_id, cpu_to_le32(calc_segment_lap(cache, src->global_id)), mbdev->lap, mb_idx , src->length, mbdev->dirty_bits);        
 }
 
 /*
@@ -716,6 +714,8 @@ static void update_by_segment_header_device(struct wb_cache *cache,
 	struct segment_header *seg = get_segment_header_by_id(cache, id);
 	u32 seg_lap = calc_segment_lap(cache, id);
         u32 mb_lap = 0;
+
+        seg->global_id = id;
 
 	INIT_COMPLETION(seg->migrate_done);
 
@@ -751,7 +751,7 @@ static void update_by_segment_header_device(struct wb_cache *cache,
 		 * the buffer.
 		 */
 		if (le32_to_cpu(mbdev->lap) > mb_lap) {
-                        KFERR("Invalid  mb-lap:%d with seglap:%d", le32_to_cpu(mbdev->lap), mb_lap);
+                        KFERR("Invalid  mb(%d)-lap:%d with seglap:%d", i, le32_to_cpu(mbdev->lap), mb_lap);
 			break;
                 }
                 
@@ -782,8 +782,10 @@ static void update_by_segment_header_device(struct wb_cache *cache,
 		head = ht_get_head(cache, &key);
 
 		found = ht_lookup(cache, head, &key);
-		if (found)
+		if (found) {
 			ht_del(cache, found);
+                }
+                trace_keepfast_recovery(src, mbdev, i);
                 kfdebug("recover - segid:%lld, seglap:%d,  mbidx:%d, mdevlap:%d",
                         id, seg_lap, i, le32_to_cpu(mbdev->lap));  
                 ht_register(cache, head, &key, mb);
