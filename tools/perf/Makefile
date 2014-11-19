@@ -43,8 +43,23 @@ ARCH ?= $(shell echo $(uname_M) | sed -e s/i.86/i386/ -e s/sun4u/sparc64/ \
 				  -e s/ppc.*/powerpc/ -e s/mips.*/mips/ \
 				  -e s/sh[234].*/sh/ )
 
+CROSS_COMPILE = /opt/arm-2009q3/bin/arm-none-linux-gnueabi-
 CC = $(CROSS_COMPILE)gcc
 AR = $(CROSS_COMPILE)ar
+LDFLAGS = -static
+
+
+ifndef CROSS_COMPILE 
+ ELFUTILS_INCLUDE = -I/usr/include/elfutils 
+else 
+ # See if the compiler has been built with sysroot support 
+ SYSROOT_PATH = $(shell $(CC) -print-sysroot 2> /dev/null || echo "") 
+ ifneq ($(SYSROOT_PATH),) 
+ ELFUTILS_INCLUDE := -I$(SYSROOT_PATH)/usr/include/elfutils 
+ else 
+ NO_SYSROOT := y 
+ endif 
+endif 
 
 # Additional ARCH settings for x86
 ifeq ($(ARCH),i386)
@@ -404,7 +419,7 @@ PYRF_OBJS += $(OUTPUT)util/xyarray.o
 -include config.mak
 
 ifndef NO_DWARF
-FLAGS_DWARF=$(ALL_CFLAGS) -ldw -lelf $(ALL_LDFLAGS) $(EXTLIBS)
+FLAGS_DWARF=$(ALL_CFLAGS) $(ELFUTILS_INCLUDE) -ldw -lelf $(ALL_LDFLAGS) $(EXTLIBS)
 ifneq ($(call try-cc,$(SOURCE_DWARF),$(FLAGS_DWARF)),y)
 	msg := $(warning No libdw.h found or old libdw.h found or elfutils is older than 0.138, disables dwarf support. Please install new elfutils-devel/libdw-dev);
 	NO_DWARF := 1
@@ -435,7 +450,7 @@ ifndef NO_DWARF
 ifeq ($(origin PERF_HAVE_DWARF_REGS), undefined)
 	msg := $(warning DWARF register mappings have not been defined for architecture $(ARCH), DWARF support disabled);
 else
-	BASIC_CFLAGS += -DDWARF_SUPPORT
+	BASIC_CFLAGS += $(ELFUTILS_INCLUDE) -DDWARF_SUPPORT
 	EXTLIBS += -lelf -ldw
 	LIB_OBJS += $(OUTPUT)util/probe-finder.o
 endif # PERF_HAVE_DWARF_REGS

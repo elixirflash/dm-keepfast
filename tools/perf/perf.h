@@ -89,6 +89,7 @@ void get_term_dimensions(struct winsize *ws);
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/syscall.h>
+#include <stdbool.h>
 
 #include "../../include/linux/perf_event.h"
 #include "util/types.h"

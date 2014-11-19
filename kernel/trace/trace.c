@@ -1024,6 +1024,7 @@ void trace_stop_cmdline_recording(void);
 static void trace_save_cmdline(struct task_struct *tsk)
 {
 	unsigned pid, idx;
+        
 
 	if (!tsk->pid || unlikely(tsk->pid > PID_MAX_DEFAULT))
 		return;
@@ -1065,6 +1066,7 @@ static void trace_save_cmdline(struct task_struct *tsk)
 void trace_find_cmdline(int pid, char comm[])
 {
 	unsigned map;
+        int i, j;
 
 	if (!pid) {
 		strcpy(comm, "<idle>");
@@ -1084,8 +1086,13 @@ void trace_find_cmdline(int pid, char comm[])
 	preempt_disable();
 	arch_spin_lock(&trace_cmdline_lock);
 	map = map_pid_to_cmdline[pid];
-	if (map != NO_CMDLINE_MAP)
+	if (map != NO_CMDLINE_MAP) {
 		strcpy(comm, saved_cmdlines[map]);
+                for (i = 0; i < TASK_COMM_LEN; i++) 
+                        if (comm[i] == ' ')
+                                for (j = i; j < TASK_COMM_LEN -1; j++) 
+                                        comm[j] = comm[j+1];
+        }
 	else
 		strcpy(comm, "<...>");
 

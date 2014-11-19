@@ -600,6 +600,7 @@ lat_print_generic(struct trace_seq *s, struct trace_entry *entry, int cpu)
 	char comm[TASK_COMM_LEN];
 
 	trace_find_cmdline(entry->pid, comm);
+        printk(KERN_INFO"comm:%s", comm);
 
 	if (!trace_seq_printf(s, "%8.8s-%-5d %3d",
 			      comm, entry->pid, cpu))
@@ -654,7 +655,7 @@ int trace_print_lat_context(struct trace_iterator *iter)
 		char comm[TASK_COMM_LEN];
 
 		trace_find_cmdline(entry->pid, comm);
-
+                printk(KERN_INFO"comm:%s, %d", comm, __LINE__);
 		ret = trace_seq_printf(s, "%16s %5d %3d %d %08x %08lx [%08llx]"
 				       " %ld.%03ldms (+%ld.%03ldms): ", comm,
 				       entry->pid, iter->cpu, entry->flags,
@@ -1274,7 +1275,6 @@ static struct trace_event trace_print_event = {
 	.type	 	= TRACE_PRINT,
 	.funcs		= &trace_print_funcs,
 };
-
 
 static struct trace_event *events[] __initdata = {
 	&trace_fn_event,
