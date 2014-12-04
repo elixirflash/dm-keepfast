@@ -519,6 +519,7 @@ struct dm_table *dm_get_live_table(struct mapped_device *md)
 
 	return t;
 }
+EXPORT_SYMBOL_GPL(dm_get_live_table);
 
 /*
  * Get the geometry associated with a dm device
@@ -2738,6 +2739,7 @@ struct gendisk *dm_disk(struct mapped_device *md)
 {
 	return md->disk;
 }
+EXPORT_SYMBOL_GPL(dm_disk);
 
 struct kobject *dm_kobject(struct mapped_device *md)
 {
