@@ -7,7 +7,8 @@
 #include "dm-keepfast.h"
 #include "dm-keepfast-metadata.h"
 #include "dm-keepfast-daemon.h"
-
+#include "dm-keepfast-policy.h"
+#include "dm-keepfast-policy-internal.h"
 
 #include <trace/events/keepfast.h>
 
@@ -71,7 +72,7 @@ static void submit_migrate_io(struct wb_cache *cache,
 			};
 			region_w = (struct dm_io_region) {
 				.bdev = wb->device->bdev,
-				.sector = mb->sector,
+				.sector = mb->oblock,
 				.count = (1 << 3),
 			};
 			RETRY(dm_safe_io(&io_req_w, 1, &region_w, NULL, false));
@@ -92,7 +93,7 @@ static void submit_migrate_io(struct wb_cache *cache,
 				};
 				region_w = (struct dm_io_region) {
 					.bdev = wb->device->bdev,
-					.sector = mb->sector + j,
+					.sector = mb->oblock + j,
 					.count = 1,
 				};
 				RETRY(dm_safe_io(&io_req_w, 1, &region_w, NULL, false));
@@ -165,16 +166,24 @@ static void memorize_dirty_state(struct wb_cache *cache,
 
 static void cleanup_segment(struct wb_cache *cache, struct segment_header *seg)
 {
+        struct policy_operation *pop = cache->pop;
+        struct cache_entry centry;
 	u8 i;
+
+        centry.seg = seg;
+
 	for (i = 0; i < seg->length; i++) {
 		struct metablock *mb = seg->mb_array + i;
-		cleanup_mb_if_dirty(cache, seg, mb);
+                centry.mb = mb;
+                
+                policy_clear_dirty(pop, &centry);
 	}
 }
 
 static void migrate_linked_segments(struct wb_cache *cache)
 {
 	struct wb_device *wb = cache->wb;
+        struct policy_operation *pop = cache->pop;
 	int r;
 	struct segment_header *seg;
 	size_t k, migrate_io_count = 0;
@@ -214,7 +223,7 @@ migrate_write:
 
 	list_for_each_entry(seg, &cache->migrate_list, migrate_list) {
 		cleanup_segment(cache, seg);
-                discard_caches_inseg(cache, seg);
+                remove_mappings_inseg(pop, seg);
 	}
 
 	/*

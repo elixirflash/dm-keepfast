@@ -25,10 +25,12 @@
 #include <linux/device-mapper.h>
 #include <linux/dm-io.h>
 
+#include "./dm-keepfast-blocktype.h"
+
 extern int kf_debug;
 
-#define OVERWRITE_ON_HIT
-#define RAM_RW_BYTEALIGN
+//#define OVERWRITE_ON_HIT
+//#define RAM_RW_BYTEALIGN
 
 #define kfdebug(f, args...) \
         if(kf_debug)        \
@@ -90,10 +92,9 @@ struct superblock_record_device {
  * Dirtiness is defined for each sector
  * in this cache line.
  */
-struct metablock {
-	sector_t sector; /* key */
-
-	u32 idx; /* Const */
+struct metablock { 
+        dm_oblock_t oblock; /* key */
+        u32 idx;
 
         u32 rhits;
         u32 whits;
@@ -124,7 +125,7 @@ struct metablock {
  * Facebook's flashcache does the same thing.
  */
 struct metablock_device {
-	__le64 sector;
+	__le32 oblock;
 	u8 dirty_bits;
 	__le32 lap;
 	u8 padding[16 - (8 + 1 + 4)];
@@ -204,9 +205,12 @@ struct segment_header_device {
 	struct metablock_device mbarr[0]; /* 16B * N */
 } __packed;
 
-struct rambuffer {
-	void *data;
-	struct completion done;
+struct cache_entry {
+        struct segment_header *seg;
+        struct metablock *mb;
+
+        dm_cblock_t cblock;
+        u8 set_partial_dirty;
 };
 
 #define STAT_OP_READ        0
@@ -235,6 +239,7 @@ struct ht_head {
 struct wb_device;
 struct wb_cache {
 	struct wb_device *wb;
+        struct policy_operation *pop;
 
 	mempool_t *buf_1_pool; /* 1 sector buffer pool */
 	mempool_t *buf_8_pool; /* 8 sector buffer pool */
@@ -246,7 +251,13 @@ struct wb_cache {
 	u32 nr_segments; /* Const */
 	u64 nr_sects; /* Const */                
 	u8 segment_size_order; /* Const */
+	u8 block_size_order; /* Const */        
 	u8 nr_caches_inseg; /* Const */
+        u32 nr_blks_inseg;
+        u32 nr_pages_inblks;
+        u32 nr_blks;
+        u32 nr_pages;
+        
 	struct bigarray *segment_header_array;
 
 	/*
@@ -284,8 +295,6 @@ struct wb_cache {
 	struct task_struct *flush_daemon;
 	spinlock_t flush_queue_lock;
 	struct list_head flush_queue;
-
-	struct list_head inv_queue;        
 
 	/*
 	 * Deferred ACK for barriers.
@@ -443,6 +452,7 @@ int dm_safe_io_internal(
 		struct dm_io_request *,
 		unsigned num_regions, struct dm_io_region *,
 		unsigned long *err_bits, bool thread, const char *caller);
+
 #define dm_safe_io(io_req, num_regions, regions, err_bits, thread) \
 		dm_safe_io_internal(wb, (io_req), (num_regions), (regions), \
 				    (err_bits), (thread), __func__);
@@ -457,6 +467,9 @@ read_segment_header_device(struct segment_header_device *dest,
 
 void inc_stat(struct wb_cache *cache, int rw, bool found, int blocks);
 void inc_op_stat(struct wb_cache *cache, int op, int val);
+
+void inc_nr_dirty_caches(struct wb_device *wb);
+void dec_nr_dirty_caches(struct wb_device *wb);
 
 /*----------------------------------------------------------------*/
 

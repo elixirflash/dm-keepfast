@@ -16,25 +16,25 @@ TRACE_EVENT(keepfast_op,
             TP_ARGS(seg, mb, op),
 
             TP_STRUCT__entry(
-                    __field(sector_t,	sector			)
+                    __field(u32,	oblock			)
                     __field(u64,	        seg_id      		)
-                    __field(u32,	        mb_id      		)  
+                    __field(u32,	        idx      		)  
                     __field(u8,	        dirty_bits		)
                     __field(u8,	        op      		)    
             ),
 
             TP_fast_assign(
                     __entry->seg_id		= seg->global_id;
-                    __entry->mb_id		= mb->idx;
-                    __entry->sector	= mb->sector;
+                    __entry->idx		= mb->idx;
+                    __entry->oblock	= mb->oblock;
                     __entry->dirty_bits     = mb->dirty_bits;
                     __entry->op             = op;
             ),
             
             TP_printk("seg_id=%llu mb_id=%d sector=%llu op=%c",
                     (u64)__entry->seg_id,
-                    (u32)__entry->mb_id,
-                    (u64)__entry->sector,
+                    (u32)__entry->idx,
+                    (u64)__entry->oblock,
                     (u32)__entry->op == 0 ? 'R' : \
                               (u32)__entry->op == 1 ? 'W' : \
                               (u32)__entry->op == 2 ? 'F' : \
@@ -51,7 +51,7 @@ TRACE_EVENT(keepfast_recovery,
                     __field(u64,	segdev_id			)
                     __field(u32,	segdev_lap         	)
                     __field(u32,         mb_idx                 )
-                    __field(sector_t,	sector      		)                             
+                    __field(u32,	oblock      		)                             
                     __field(u8,	        dirty_bits		)
                     __field(u32,        mb_lap      		)    
             ),
@@ -60,7 +60,7 @@ TRACE_EVENT(keepfast_recovery,
                     __entry->segdev_id		= segdev->global_id;
                     __entry->segdev_lap		= segdev->lap;
                     __entry->mb_idx		= i;
-                    __entry->sector	        = mbdev->sector;
+                    __entry->oblock	        = mbdev->oblock;
                     __entry->dirty_bits         = mbdev->dirty_bits;
                     __entry->mb_lap             = mbdev->lap
             ),
@@ -69,7 +69,7 @@ TRACE_EVENT(keepfast_recovery,
                     (u64)__entry->segdev_id,
                     (u32)__entry->segdev_lap,    
                     (u32)__entry->mb_idx,
-                    (sector_t)__entry->sector,
+                    (sector_t)__entry->oblock,
                     (u8)__entry->dirty_bits,
                     (u32)__entry->mb_lap
            )
