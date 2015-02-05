@@ -10,7 +10,7 @@
 /*----------------------------------------------------------------*/
 
 struct segment_header *get_segment_header_by_id(struct wb_cache *,
-						u64 segment_id);
+						u32 segment_id);
 struct segment_header *get_segment_header_by_mb(struct wb_cache *cache,
                                                 struct metablock *mb);
 sector_t calc_mb_start_sector(struct wb_cache *,
@@ -25,15 +25,12 @@ int __must_check format_cache_device(struct dm_dev *, struct wb_cache *);
 
 /*----------------------------------------------------------------*/
 
-void meta_prepare_for_write(struct segment_header_device *dest,
-                            struct wb_cache *cache,
-                            struct segment_header *src,
-                            u32 mb_idx);
+void meta_prepare_for_write(struct wb_cache *cache, struct cache_entry *centry, struct segment_header_device *dest);
 
 /*----------------------------------------------------------------*/
 
-int alloc_migration_buffer(struct wb_cache *cache, size_t nr_batch);
-void free_migration_buffer(struct wb_cache *cache);
+int alloc_flush_buffer(struct wb_cache *cache, size_t nr_batch);
+void free_flush_buffer(struct wb_cache *cache);
 
 /*----------------------------------------------------------------*/
 
@@ -45,7 +42,7 @@ void free_cache(struct wb_cache *cache);
 u32 calc_segment_lap(struct wb_cache *cache, u64 segment_id);
 
 #define  get_mb_idx_inseg(cache, idx, idx_inseg) \
-        div_u64_rem(idx, cache->nr_caches_inseg, idx_inseg)
+        div_u64_rem(idx, cache->nr_blocks_inseg, idx_inseg)
 
 struct bigarray *make_bigarray(u32 elemsize, u64 nr_elems);
 void kill_bigarray(struct bigarray *arr);

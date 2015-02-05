@@ -72,18 +72,10 @@ extern int kf_debug;
   * "WBst"
   */
 #define KEEPFAST_MAGIC 0x57427374
-struct superblock_header_device {
+struct superblock_device {
 	__le32 magic;
 	u8 segment_size_order;
-} __packed;
-
-/*
- * Superblock Record (Mutable)
- * Last one sector of the superblock region.
- * Record the current cache status in need.
- */
-struct superblock_record_device {
-	__le64 last_migrated_segment_id;
+	__le32 last_flushed_segment_id;        
 } __packed;
 
 /*
@@ -92,29 +84,13 @@ struct superblock_record_device {
  * Dirtiness is defined for each sector
  * in this cache line.
  */
-struct metablock { 
-        dm_oblock_t oblock; /* key */
-        u32 idx;
-
-        u32 rhits;
-        u32 whits;
+struct metablock {
+        u32 oblock_packed_d; /* with dirty flag */
+        u32 idx_packed_v;    /* with valid flag */        
+        u32 hit_count;
 
 	struct hlist_node ht_list;
-        struct list_head inv_list;
-
-	/*
-	 * 8 bit flag for dirtiness
-	 * for each sector in cache line.
-	 *
-	 * Current implementation
-	 * only recovers dirty caches.
-	 * Recovering clean caches complicates the code
-	 * but couldn't be effective
-	 * since only few of the caches are clean.
-	 */
-	u8 dirty_bits;
-
-	struct completion flush_done;        
+        struct list_head hot_list;
 };
 
 /*
@@ -125,9 +101,9 @@ struct metablock {
  * Facebook's flashcache does the same thing.
  */
 struct metablock_device {
-	__le32 oblock;
-	u8 dirty_bits;
-	__le32 lap;
+	__le32 oblock_packed_d; /* with dirty flag */
+        u32 idx_packed_v; /* with valid flag */
+        u32 hit_count;
 	u8 padding[16 - (8 + 1 + 4)];
 } __packed;
 
@@ -138,7 +114,7 @@ struct segment_header {
 	 * ID 0 is used to tell that the segment is invalid
 	 * and valid id >= 1.
 	 */
-	u64 global_id;
+	u32 global_id;
 
 	/*
 	 * Segment can be flushed half-done.
@@ -149,25 +125,17 @@ struct segment_header {
 	u8 length;
 
 	u32 start_idx; /* Const */
-	sector_t start_sector; /* Const */
+        dm_cblock_t start_sector; /* Const */
 
-	struct list_head migrate_list;
+	struct list_head flush_list;
 
         bool last_mb_in_segment;        
 
 	/*
-	 * This segment can not be migrated
-	 * to backin store
-	 * until flushed.
-	 * Flushed segment is in cache device.
+	 * This segment can not be overwritten
+	 * until flushd.
 	 */
 	struct completion flush_done;
-
-	/*
-	 * This segment can not be overwritten
-	 * until migrated.
-	 */
-	struct completion migrate_done;
 
 	spinlock_t lock;
 
@@ -193,13 +161,12 @@ struct segment_header {
  */
 struct segment_header_device {
 	/* - FROM ------------------------------------ */
-	__le64 global_id;
+	__le32 global_id;
 	/*
 	 * On what lap in rorating on cache device
 	 * used to find the head and tail in the
 	 * segments in cache device.
 	 */
-	__le32 lap;
 	u8 padding[512 - (8 + 4)]; /* 512B */
 	/* - TO -------------------------------------- */
 	struct metablock_device mbarr[0]; /* 16B * N */
@@ -209,9 +176,25 @@ struct cache_entry {
         struct segment_header *seg;
         struct metablock *mb;
 
+        dm_oblock_t oblock; //for debugging
         dm_cblock_t cblock;
+        u32 idx;
         u8 set_partial_dirty;
+        u8 dflags;
+        u8 vflags;
+        u8 hot;
+
+        struct sub_entry {
+                u8 tag;
+                u8 vflag;
+                u8 dflag;                
+                dm_oblock_t oblock;
+                dm_cblock_t cblock;                
+        } se;
+
 };
+
+#define INIT_CACHE_ENTRY(x) x = {0, }
 
 #define STAT_OP_READ        0
 #define STAT_OP_WRITE       1
@@ -247,14 +230,15 @@ struct wb_cache {
 
 	struct dm_dev *device;
 	struct mutex io_lock;
-	u32 nr_caches; /* Const */
+	u32 nr_blocks; /* Const */
 	u32 nr_segments; /* Const */
-	u64 nr_sects; /* Const */                
+	u32 nr_sects; /* Const */
 	u8 segment_size_order; /* Const */
-	u8 block_size_order; /* Const */        
-	u8 nr_caches_inseg; /* Const */
-        u32 nr_blks_inseg;
-        u32 nr_pages_inblks;
+	u8 block_size_order; /* Const */
+        u32 nr_sectors_per_block_shift;
+        u32 sectors_per_page;
+	u8 nr_blocks_inseg; /* Const */
+        u32 nr_pages_inblock;
         u32 nr_blks;
         u32 nr_pages;
         
@@ -276,25 +260,21 @@ struct wb_cache {
 	spinlock_t cursor_lock;        
 	struct segment_header *current_seg;
 
-	struct rambuffer *current_rambuf;
-	u32 rambuf_pool_amount; /* kB */
-	u32 nr_rambuf_pool; /* Const */
-	struct rambuffer *rambuf_pool;
-
-	atomic64_t last_migrated_segment_id;
-	atomic64_t last_fulled_segment_id;
-	int urge_migrate;
+	u32 last_flushed_segment_id;
+	u32 last_filled_segment_id;
+	int urge_flush;
 
 	/*
-	 * Flush daemon
+	 * Flush thread
 	 *
 	 * Keepfast first queue the segment to flush
-	 * and flush daemon asynchronously
+	 * and flush thread asynchronously
 	 * flush them to the cache device.
 	 */
-	struct task_struct *flush_daemon;
+	struct task_struct *flush_thread;
 	spinlock_t flush_queue_lock;
 	struct list_head flush_queue;
+	int allow_flush; /* param */        
 
 	/*
 	 * Deferred ACK for barriers.
@@ -305,41 +285,29 @@ struct wb_cache {
 	unsigned long barrier_deadline_ms; /* param */
 
 	/*
-	 * Migration daemon
+	 * Batched Flush
 	 *
-	 * Migartion also works in background.
-	 *
-	 * If allow_migrate is true,
-	 * migrate daemon goes into migration
-	 * if they are segments to migrate.
-	 */
-	struct task_struct *migrate_daemon;
-	int allow_migrate; /* param */
-
-	/*
-	 * Batched Migration
-	 *
-	 * Migration is done atomically
+	 * Flush is done atomically
 	 * with number of segments batched.
 	 */
-	wait_queue_head_t migrate_wait_queue;
-	atomic_t migrate_fail_count;
-	atomic_t migrate_io_count;
-	struct list_head migrate_list;
+	wait_queue_head_t flush_wait_queue;
+	atomic_t flush_fail_count;
+	atomic_t flush_io_count;
+	struct list_head flush_list;
 	u8 *dirtiness_snapshot;
-	void *migrate_buffer;
-	u32 nr_cur_batched_migration;
-	u32 nr_max_batched_migration; /* param */
+	void *flush_buffer;
+	u32 nr_cur_batched_flush;
+	u32 nr_max_batched_flush; /* param */
 
 	/*
-	 * Migration modulator
+	 * Flush modulator
 	 *
-	 * This daemon turns on and off
-	 * the migration
+	 * This thread turns on and off
+	 * the flush
 	 * according to the load of backing store.
 	 */
-	struct task_struct *modulator_daemon;
-	int enable_migration_modulator; /* param */
+	struct task_struct *balance_dirty_thread;
+	int enable_balance_dirty; /* param */
 
 	/*
 	 * Superblock Recorder
@@ -347,8 +315,8 @@ struct wb_cache {
 	 * Update the superblock record
 	 * periodically.
 	 */
-	struct task_struct *recorder_daemon;
-	unsigned long update_record_interval; /* param */
+	struct task_struct *flush_sb_thread;
+	unsigned long flush_sb_interval; /* param */
 
 	/*
 	 * Cache Synchronizer
@@ -356,7 +324,7 @@ struct wb_cache {
 	 * Sync the dirty writes
 	 * periodically.
 	 */
-	struct task_struct *sync_daemon;
+	struct task_struct *sync_thread;
 	unsigned long sync_interval; /* param */
 
 	atomic64_t stat[STATLEN];
@@ -370,8 +338,8 @@ struct wb_device {
 
 	struct wb_cache *cache;
 
-	u8 high_migrate_threshold;
-	u8 low_migrate_threshold;        
+	u8 high_flush_threshold;
+	u8 low_flush_threshold;        
 
 	atomic64_t nr_dirty_caches;
 
@@ -459,7 +427,7 @@ int dm_safe_io_internal(
 
 sector_t dm_devsize(struct dm_dev *);
 
-sector_t calc_segment_header_start(struct wb_cache *cache,
+dm_cblock_t calc_segment_header_start(struct wb_cache *cache,
                                    u32 segment_idx);
 int __must_check
 read_segment_header_device(struct segment_header_device *dest,

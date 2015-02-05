@@ -134,10 +134,13 @@ struct policy_operation {
 	 * Returns 0 if in cache, -ENOENT if not, < 0 for other errors
 	 * (-EWOULDBLOCK would be typical).
 	 */
-	int (*lookup)(struct policy_operation *pop, dm_oblock_t oblock, struct cache_entry *centry);
+	int (*lookup)(struct policy_operation *pop, dm_oblock_t oblock, struct cache_entry *ce);
 
-	void (*set_dirty)(struct policy_operation *pop, struct cache_entry *centry);
-	void (*clear_dirty)(struct policy_operation *pop, struct cache_entry *centry);
+	void (*set_valid)(struct policy_operation *pop, struct cache_entry *ce);
+	void (*clear_valid)(struct policy_operation *pop, struct cache_entry *ce);        
+
+	void (*set_dirty)(struct policy_operation *pop, struct cache_entry *ce);
+	void (*clear_dirty)(struct policy_operation *pop, struct cache_entry *ce);
 
 	/*
 	 * Called when a cache target is first created.  Used to load a
@@ -153,8 +156,8 @@ struct policy_operation {
 	 * Override functions used on the error paths of the core target.
 	 * They must succeed.
 	 */
-	void (*remove_mapping)(struct policy_operation *pop, struct cache_entry *centry);
-	void (*insert_mapping)(struct policy_operation *pop, dm_oblock_t oblock, struct cache_entry *centry);
+	void (*remove_mapping)(struct policy_operation *pop, struct cache_entry *ce);
+	void (*insert_mapping)(struct policy_operation *pop, dm_oblock_t oblock, struct cache_entry *ce);
 	void (*force_mapping)(struct policy_operation *pop, dm_oblock_t current_oblock,
 			      dm_oblock_t new_oblock);
 
@@ -243,11 +246,16 @@ struct dm_cache_policy_type {
 					  sector_t block_size);
 };
 
-extern int add_invalid_centry(struct policy_operation *pop, struct cache_entry *centry);
+extern int add_invalid_ce(struct policy_operation *pop, struct cache_entry *ce);
 extern void remove_mappings_inseg(struct policy_operation *pop, struct segment_header *seg);
-extern void alloc_cache_entry(struct policy_operation *pop, struct cache_entry *centry);
+extern void alloc_cache_entry(struct policy_operation *pop, struct cache_entry *ce);
 extern bool policy_bytealign;
 extern bool policy_overwrite;
+extern int try_lru_put_hot(struct policy_operation *pop, struct cache_entry *ce);
+extern  void unpack_dflag(u32 value_le, dm_block_t *block, u8 *dflag);
+extern __le32 pack_dflag(dm_block_t block, u8 dflag);
+extern void unpack_vflag(__le32 value_le, u32 *idx, u8 *vflag);
+extern __le32 pack_vflag(u32 idx, u8 vflag);
 
 /*----------------------------------------------------------------*/
 

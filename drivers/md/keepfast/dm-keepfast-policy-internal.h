@@ -28,6 +28,12 @@ static inline int policy_lookup(struct policy_operation *pop, dm_oblock_t oblock
 	return pop->lookup(pop, oblock, centry);
 }
 
+static inline void policy_set_valid(struct policy_operation *pop, struct cache_entry *centry)
+{
+	if (pop->set_valid)
+		pop->set_valid(pop, centry);        
+}
+
 static inline void policy_set_dirty(struct policy_operation *pop, struct cache_entry *centry)
 {
 	if (pop->set_dirty)

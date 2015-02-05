@@ -9,7 +9,7 @@
 
 /*----------------------------------------------------------------*/
 
-int flush_proc(void *);
+int do_flush(void *);
 
 /*----------------------------------------------------------------*/
 
@@ -19,12 +19,12 @@ void flush_barrier_ios(struct work_struct *);
 
 /*----------------------------------------------------------------*/
 
-int migrate_proc(void *);
-void wait_for_migration(struct wb_cache *, u64 id);
+int do_flush_sb(void *);
+void wait_for_flush(struct wb_cache *, u32 id);
 
 /*----------------------------------------------------------------*/
 
-int modulator_proc(void *);
+int do_balance_dirty(void *);
 
 /*----------------------------------------------------------------*/
 
