@@ -2,7 +2,7 @@
  * keepfast
  * Log-structured Caching for Linux
  *
- * Copyright (C) 2012-2013 Akira Hayakawa <ruby.wktk@gmail.com>
+ * Copyright (C) 2014-2015 Jungmo Ahn <jungmoan@gmail.com>
  *
  * This file is released under the GPL.
  */
@@ -13,6 +13,7 @@
 #include "dm-keepfast-policy.h"
 #include "dm-keepfast-policy-internal.h"
 #include "dm-keepfast-blocktype.h"
+#include "../dm-bio-record.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/keepfast.h>
@@ -24,64 +25,65 @@ EXPORT_TRACEPOINT_SYMBOL(keepfast_op);
 		goto exit_parse_arg; \
 	} }
 
-int kf_debug = 1;
+int kf_debug = 0;
 
 /* SYSFS */
 static ssize_t cache_stats_show(struct device *dev,
 				  struct device_attribute *attr, char *page)
 {
+        u32 len=0;
+
 	struct gendisk *disk = dev_to_disk(dev);
 	struct mapped_device *md = disk->private_data;
         struct dm_target *ti = dm_table_get_target(dm_get_live_table(md), 0);
+#if 0                
 	struct wb_device *wb = ti->private;
         struct wb_cache *cache = wb->cache;
-	struct segment_header *current_seg = cache->current_seg;
-        u64 lfilled = cache->last_filled_segment_id;
-        u64 lflushed = cache->last_flushed_segment_id;
-        u32 caching_segs = lfilled - lflushed;
+        struct cache_stats *stats = &cache->stats;
+        u32 len = 0;
 
-        u64 hit_read_full = atomic64_read(&cache->stat[(1 << STAT_HIT) + (1 << STAT_FULLSIZE)]);
-        u64 hit_read_partial = atomic64_read(&cache->stat[(1 << STAT_HIT)]);
-        u64 hit_read = hit_read_full + hit_read_partial;
-        u64 hit_write_full = atomic64_read(&cache->stat[(1 << STAT_HIT) + (1 << STAT_WRITE) + (1 << STAT_FULLSIZE)]);
-        u64 hit_write_partial = atomic64_read(&cache->stat[(1 << STAT_HIT) + (1 << STAT_WRITE)]);
-        u64 hit_write = hit_write_full + hit_write_partial;
+        u64 whit = atomic64_read(&stats->whit);
+        u64 rhit = atomic64_read(&stats->rhit);
+        u64 wmiss = atomic64_read(&stats->wmiss);
+        u64 rmiss = atomic64_read(&stats->rmiss);
+        u64 flush = atomic64_read(&stats->flush);
+        u64 bypass = atomic64_read(&stats->bypass);
+        u64 replace = atomic64_read(&stats->replace);
+        u64 valid = atomic64_read(&stats->valid);
+        u64 dirty = atomic64_read(&stats->dirty);
+        u64 hot = atomic64_read(&stats->hot);
 
-        u64 miss_read_full = atomic64_read(&cache->stat[(1 << STAT_FULLSIZE)]);
-        u64 miss_read_partial = atomic64_read(&cache->stat[0]);
-        u64 miss_read = miss_read_full + miss_read_partial;
-        u64 miss_write_full = atomic64_read(&cache->stat[(1 << STAT_WRITE) + (1 << STAT_FULLSIZE)]);
-        u64 miss_write_partial = atomic64_read(&cache->stat[(1 << STAT_WRITE)]);
-        u64 miss_write = miss_write_full + miss_write_partial;
+        len += snprintf(page, PAGE_SIZE, "%15s : %10d\n", "current seg", cache->current_seg->global_id);
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10d segs\n", "segments", cache->nr_segments);
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10d entries\n", "cache entries",
+                        cache->nr_segments * cache->nr_blocks_inseg);
+        
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10d entries\n", "sub entries",
+                        cache->nr_segments * cache->nr_blocks_inseg * cache->nr_pages_inblock);
+        
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10d %% \n", "cache rate",
+                        (u32)div_u64(valid * 100, cache->nr_segments * cache->nr_blocks_inseg * cache->nr_pages_inblock));        
 
-        u64 bypass = atomic64_read(&cache->op_stat[STAT_OP_BYPASS]);
-        u64 inv = atomic64_read(&cache->op_stat[STAT_OP_INV]);
-        u64 flush = atomic64_read(&cache->op_stat[STAT_OP_FLUSH]);
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10d %% \n", "dirty rate",
+                        (u32)div_u64(dirty * 100, cache->nr_segments * cache->nr_blocks_inseg * cache->nr_pages_inblock));
+        
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10lld sentries\n", "dirty", dirty);
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10lld sentries\n", "valid", valid);
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10lld centries\n", "hot", hot);        
 
-        u32 segs = cache->nr_segments;
-
-        u32 hit_rate = (u32)((hit_write + hit_read) / 8) / (u32)((hit_write + hit_read + miss_write + miss_read + bypass) / 8) * 100;
-
-        return snprintf(page, PAGE_SIZE,
-                        "total segs    : %10d, segs"
-                        "current seg   : %10d\n"
-                        "caching segs  : %10d segments(last filled:%10lld, Last flushed:%10lld)\n"
-                        "cache hit rate: %10d  \n"
-                       "bypass(write) : %10lld sectors\n"                        
-                        "hit read      : %10lld sectors(full:%10lld, partial:%10lld)\n"
-                        "hit write     : %10lld sectors(full:%10lld, partial:%10lld)\n"
-                        "miss read     : %10lld sectors(full:%10lld, partial:%10lld)\n"
-                        "miss write    : %10lld sectors(full:%10lld, partial:%10lld)\n"
-                        "invalidate    : %10lld sectors\n"
-                        "flush         : %10lld sectors\n"
-                        "8 sectors per cacheline(4k)\n",
-                        segs, current_seg->global_id, 
-                        caching_segs, lfilled, lflushed, hit_rate, bypass,
-                        hit_read, hit_read_full, hit_read_partial,
-                        hit_write, hit_write_full, hit_write_partial,
-                        miss_read, miss_read_full, miss_read_partial,
-                        miss_write, miss_write_full, miss_write_partial,
-                        inv, flush);        
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10d %% \n", "hit rate",
+                        (u32)div_u64((whit + rhit + replace) * 100, whit + rhit + wmiss + rmiss + replace));        
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10lld sentries\n", "write hit", whit);
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10lld sentries\n", "write miss", wmiss);
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10lld sentries\n", "read hit", rhit);
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10lld sentries\n", "read miss", rmiss);
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10lld sentries\n", "replace", replace);
+        
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10lld sentries\n", "flush", flush);
+        len += snprintf(page + len, PAGE_SIZE, "%15s : %10lld sentries\n", "bypass", bypass);
+#endif
+	dm_put(md);        
+        return len;
 }
 
 static DEVICE_ATTR(cache_stats, S_IRUGO, cache_stats_show, NULL);
@@ -110,6 +112,349 @@ static void safe_io_proc(struct work_struct *work)
 	io->err_bits = 0;
 	io->err = dm_io(io->io_req, io->num_regions, io->regions,
 			&io->err_bits);
+}
+
+/*----------------------------------------------------------------*/
+
+struct dm_hook_info {
+	bio_end_io_t *bi_end_io;
+	void *bi_private;
+};
+
+/*
+ * There are a couple of places where we let a bio run, but want to do some
+ * work before calling its endio function.  We do this by temporarily
+ * changing the endio fn.
+ */
+
+struct per_bio_data {
+	void *ptr;
+	struct dm_hook_info hook_info;        
+
+	/*
+	 * writethrough fields.  These MUST remain at the end of this
+	 * structure and the 'cache' member must be the first as it
+	 * is used to determine the offset of the writethrough fields.
+	 */
+	struct wb_cache *cache;
+        u8 tag;
+	dm_cblock_t cblock;
+	struct dm_bio_details bio_details;
+};
+
+static void remap_to_origin(struct wb_cache *cache, struct bio *bio)
+{
+	struct dm_dev *orig = cache->wb->device;
+	bio->bi_bdev = orig->bdev;
+}
+
+static void remap_to_cache(struct wb_cache *cache, struct bio *bio, sector_t sector)
+{
+	struct dm_dev *cache_dev = cache->device;
+	bio->bi_bdev = cache_dev->bdev;
+	bio->bi_sector = sector;        
+}
+
+#if 1
+static void dm_hook_bio(struct dm_hook_info *h, struct bio *bio,
+			bio_end_io_t *bi_end_io, void *bi_private)
+{
+	h->bi_end_io = bio->bi_end_io;
+	h->bi_private = bio->bi_private;
+
+	bio->bi_end_io = bi_end_io;
+        bio->bi_private = bi_private;
+}
+
+static void dm_unhook_bio(struct dm_hook_info *h, struct bio *bio)
+{
+	bio->bi_end_io = h->bi_end_io;
+	bio->bi_private = h->bi_private;
+
+	/*
+	 * Must bump bi_remaining to allow bio to complete with
+	 * restored bi_end_io.
+	 */
+	atomic_inc(&bio->bi_remaining);
+}
+
+/*----------------------------------------------------------------*/
+
+static int keepfast_end_io(struct dm_target *ti, struct bio *bio, int error)
+{
+	struct wb_device *wb = ti->private;
+	struct wb_cache *cache = wb->cache;
+	struct segment_header *seg;
+	struct per_bio_data *map_context =
+		dm_per_bio_data(bio, ti->per_bio_data_size);
+
+	if (!map_context->ptr) {
+		return 0;
+        }
+
+	seg = map_context->ptr;
+	atomic_dec(&seg->nr_inflight_ios);
+
+	return 0;
+}
+
+#if 0
+static void writemeta_endio(struct bio *bio, int err)
+{
+	struct per_bio_data *pb = dm_per_bio_data(bio, sizeof(struct per_bio_data));
+
+        mb = pb->ptr;
+
+        seg = get_segment_header_by_mb(cache, mb);        
+        atomic_dec(&seg->nr_inflight_ios);
+
+	dm_unhook_bio(&pb->hook_info, bio);
+
+        //	dm_bio_restore(&pb->bio_details, bio);
+        //	remap_to_cache(pb->cache, bio, pb->cblock);
+
+	/*
+	 * We can't issue this bio directly, since we're in interrupt
+	 * context.  So it gets put on a bio list for processing by the
+	 * worker thread.
+	 */
+	defer_writemeta_bio(pb->cache, bio);
+}
+#endif
+
+static void defer_readthrough_bio(struct wb_cache *cache, struct bio *bio);
+
+static void readthrough_endio(struct bio *bio, int err)
+{
+	struct per_bio_data *pb = dm_per_bio_data(bio, sizeof(struct per_bio_data));
+
+	dm_unhook_bio(&pb->hook_info, bio);
+        
+	if (err) {
+                printk(KERN_INFO"ERR!");
+                while(1);
+		bio_endio(bio, err);
+		return;
+	}
+
+        dm_bio_restore(&pb->bio_details, bio);
+        //	remap_to_cache(pb->cache, bio, pb->cblock);
+
+	/*
+	 * We can't issue this bio directly, since we're in interrupt
+	 * context.  So it gets put on a bio list for processing by the
+	 * worker thread.
+	 */
+	defer_readthrough_bio(pb->cache, bio);
+}
+
+static void wake_worker(struct wb_cache *cache)
+{
+	queue_work(cache->wq, &cache->worker);
+}
+
+static void defer_readthrough_bio(struct wb_cache *cache, struct bio *bio)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	bio_list_add(&cache->deferred_readthrough_bios, bio);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wake_worker(cache);
+}
+
+/*
+ * When running in writethrough mode we need to send writes to clean blocks
+ * to both the cache and origin devices.  In future we'd like to clone the
+ * bio and send them in parallel, but for now we're doing them in
+ * series as this is easier.
+ */
+static void remap_to_origin_then_cache(struct wb_cache *cache, struct bio *bio)
+{
+	struct per_bio_data *pb = dm_per_bio_data(bio, sizeof(struct per_bio_data));
+
+	pb->cache = cache;
+        //        dm_hook_bio(&pb->hook_info, bio, readthrough_endio, bio->bi_private);
+        //	dm_bio_record(&pb->bio_details, bio);
+        //        remap_to_origin(cache, bio);
+        // 
+        //	remap_to_origin_clear_discard(pb->cache, bio, oblock);
+}
+
+#if 0
+static void defer_writemeta_bio(struct wb_cache *cache, struct bio *bio)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	bio_list_add(&cache->deferred_writemeta_bios, bio);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wake_worker(cache);
+}
+#endif
+
+#if 0
+static void process_deferred_writemeta_bios(struct cache *cache)
+{
+	unsigned long flags;
+	struct bio_list bios;
+	struct bio *bio;
+        struct dm_io_request io_req_r, io_req_w;
+        struct dm_io_region region_r, region_w;
+	struct per_bio_data *pb;        
+        struct segment_header *seg;
+        struct metablock *mb;
+        struct wb_cache *cache;
+        void *buf =  mempool_alloc(cache->buf_8_pool, GFP_NOIO);                 
+
+	bio_list_init(&bios);
+
+	spin_lock_irqsave(&cache->lock, flags);
+	bio_list_merge(&bios, &cache->deferred_writethrough_bios);
+	bio_list_init(&cache->deferred_writethrough_bios);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	/*
+	 * These bios have already been through inc_ds()
+	 */
+	while ((bio = bio_list_pop(&bios))) {
+                pb = dm_per_bio_data(bio, sizeof(struct per_bio_data));
+                cache = pb->cache;
+                mb = pb->ptr;
+                seg = get_segment_header_by_mb(cache, mb);
+                
+                memset(buf, 0, 4096);
+                meta_prepare_for_write(cache, seg, buf);
+
+                io_req_w = (struct dm_io_request) {
+                        .client = wb_io_client,
+                        .bi_rw = WRITE_FUA, /* No need FUA for RAM */
+                        .notify.fn = NULL,
+                        .mem.type = DM_IO_KMEM,
+                        .mem.ptr.addr = buf,
+                };
+                region_w = (struct dm_io_region) {
+                        .bdev = cache->device->bdev,
+                        .sector = seg->start_sector,
+                        .count = (1 << 3),
+                        .rvec_count = 0,
+                };
+#if 0
+                if(policy_bytealign) {
+                        region_w.rvec =  mempool_alloc(cache->buf_8_pool, GFP_NOIO);
+                        if(seg->length == 1) {
+                                region_w.rvec_count = 2;
+                                region_w.rvec[rvec_idx].rv_offset = 0;
+                                region_w.rvec[rvec_idx].rv_len = 12;
+                                rvec_idx++;
+                        } else
+                                region_w.rvec_count = 1;
+                
+                        region_w.rvec[rvec_idx].rv_offset = 512 + sizeof(struct metablock_device) * idx_inseg;
+                        region_w.rvec[rvec_idx].rv_len = sizeof(struct metablock_device);
+                }
+#endif
+                RETRY(dm_safe_io(&io_req_w, 1, &region_w, NULL, 0));
+        }
+        
+        mempool_free(region_w.rvec, cache->buf_1_pool);
+        mempool_free(buf, cache->buf_8_pool);
+}
+#endif
+
+static void process_deferred_readthrough_bios(struct wb_cache *cache)
+{
+        struct policy_operation *pop = cache->pop;
+        struct cache_entry ce = {0, };        
+	unsigned long flags;
+	struct bio_list bios;
+	struct bio *bio;
+        enum policy_operation_result presult;        
+
+	bio_list_init(&bios);
+        
+	spin_lock_irqsave(&cache->lock, flags);
+	bio_list_merge(&bios, &cache->deferred_readthrough_bios);
+	bio_list_init(&cache->deferred_readthrough_bios);
+	spin_unlock_irqrestore(&cache->lock, flags);
+        
+	/*
+	 * These bios have already been through inc_ds()
+	 */
+
+        //			bio_endio(bio, 0);
+	while ((bio = bio_list_pop(&bios))) {
+                struct per_bio_data *pb = dm_per_bio_data(bio, sizeof(struct per_bio_data));                
+                /*   cache lookup               */
+                bio->bi_rw = WRITE;
+                remap_to_cache(cache, bio, pb->cblock);
+                generic_make_request(bio);
+        }
+}
+
+static void process_deferred_bios(struct wb_cache *cache)
+{
+        struct policy_operation *pop = cache->pop;
+        struct cache_entry ce = {0, };        
+	unsigned long flags;
+	struct bio_list bios;
+	struct bio *bio;
+        enum policy_operation_result presult;
+
+	bio_list_init(&bios);
+        
+	spin_lock_irqsave(&cache->lock, flags);
+	bio_list_merge(&bios, &cache->deferred_bios);
+	bio_list_init(&cache->deferred_bios);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	/*
+	 * These bios have already been through inc_ds()
+	 */
+
+        //			bio_endio(bio, 0);
+	while ((bio = bio_list_pop(&bios))) {
+                struct per_bio_data *pb = dm_per_bio_data(bio, sizeof(struct per_bio_data));
+                
+                //                dm_hook_bio(&pb->hook_info, bio, readthrough_endio, bio->bi_private);
+                dm_hook_bio(&pb->hook_info, bio, readthrough_endio, NULL);
+
+                dm_bio_record(&pb->bio_details, bio);
+                remap_to_origin(cache, bio);
+                //                bio->bi_end_io = NULL;                
+
+                //                dm_bio_record(&pb->bio_details, bio);                
+                //                bio->bi_rw = WRITE;
+                generic_make_request(bio);
+        }        
+}
+
+static void do_worker(struct work_struct *ws)
+{
+        struct wb_cache *cache = container_of(ws, struct wb_cache, worker);
+
+        do {
+                process_deferred_readthrough_bios(cache);
+                process_deferred_bios(cache);                
+                //                process_deferred_writemeta_bios(cache);
+        }while(!bio_list_empty(&cache->deferred_readthrough_bios) ||
+               !bio_list_empty(&cache->deferred_bios));
+               //|| !bio_list_empty(&cache->deferred_writemeta_bios));
+}
+
+#endif
+
+static void defer_bio(struct wb_cache *cache, struct bio *bio)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	bio_list_add(&cache->deferred_bios, bio);
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wake_worker(cache);
 }
 
 /*
@@ -146,7 +491,7 @@ int dm_safe_io_internal(
 		if (err_bits)
 			*err_bits = io.err_bits;
 	} else {
-		wait_on_blockup();
+                wait_on_blockup();
 		err = dm_io(io_req, num_regions, regions, err_bits);
 	}
 
@@ -175,76 +520,12 @@ sector_t dm_devsize(struct dm_dev *dev)
 
 /*----------------------------------------------------------------*/
 
-void inc_nr_dirty_caches(struct wb_device *wb)
-{
-	BUG_ON(!wb);
-	atomic64_inc(&wb->nr_dirty_caches);
-}
-
-void dec_nr_dirty_caches(struct wb_device *wb)
-{
-	BUG_ON(!wb);
-	atomic64_dec(&wb->nr_dirty_caches);
-}
-
-void inc_op_stat(struct wb_cache *cache, int op, int val)
- {
- 	atomic64_t *v;
-        int i = 0;
-        u64 blocks = 0;
-
-        if(op == STAT_OP_BYPASS)
-                blocks = val;
-        else {
-                for (; i < 8; i++) {
-                        bool b = val & (1 << i);
-                        if(b)
-                                blocks++;
-                }
-        }
-
-        if(op == STAT_OP_FLUSH)
-                v = &cache->op_stat[STAT_OP_FLUSH];
-        else if(op == STAT_OP_INV)
-                v = &cache->op_stat[STAT_OP_INV];
-        else 
-                v = &cache->op_stat[STAT_OP_BYPASS];
-
-        atomic64_add(blocks, v); 
-}
-
-void inc_stat(struct wb_cache *cache, int rw, bool found, int blocks)
-{
-	atomic64_t *v;
-        int i = 0;
-
-	if (rw)
-		i |= (1 << STAT_WRITE);
-	if (found)
-		i |= (1 << STAT_HIT);
-	if (blocks == 8)
-		i |= (1 << STAT_FULLSIZE);
-
-	v = &cache->stat[i];
-
-        atomic64_add((u64)blocks, v);
-}
-
-static void clear_stat(struct wb_cache *cache)
-{
-	int i;
-	for (i = 0; i < STATLEN; i++) {
-		atomic64_t *v = &cache->stat[i];
-		atomic64_set(v, 0);
-	}
-}
-
 /** 
  * flush seg or mb
  * 
  * @param seg 
  */
-void flush_meta(struct wb_cache *cache, struct cache_entry *ce)
+void flush_meta(struct wb_cache *cache, struct cache_entry *ce, bool thread)
 {
 	struct wb_device *wb = cache->wb;
         int r;
@@ -252,18 +533,20 @@ void flush_meta(struct wb_cache *cache, struct cache_entry *ce)
         struct dm_io_region region_w;
         struct segment_header *seg = ce->seg;
         void *buf =  mempool_alloc(cache->buf_8_pool, GFP_NOIO);
+        
 #if 0        
         u32 idx_inseg;
         int rvec_idx = 0;
 
         get_mb_idx_inseg(cache, mb->idx, &idx_inseg);
 #endif
-        meta_prepare_for_write(cache, ce, buf);
-        //        meta_prepare_for_write(buf, cache, ce->seg, idx_inse);
+
+        memset(buf, 0, 4096);
+        meta_prepare_for_write(cache, seg, buf);
 
         io_req_w = (struct dm_io_request) {
                 .client = wb_io_client,
-                .bi_rw = WRITE, /* No need FUA for RAM */
+                .bi_rw = WRITE_FUA, /* No need FUA for RAM */
                 .notify.fn = NULL,
                 .mem.type = DM_IO_KMEM,
                 .mem.ptr.addr = buf,
@@ -289,7 +572,7 @@ void flush_meta(struct wb_cache *cache, struct cache_entry *ce)
                 region_w.rvec[rvec_idx].rv_len = sizeof(struct metablock_device);
         }
 #endif
-        RETRY(dm_safe_io(&io_req_w, 1, &region_w, NULL, true));
+        RETRY(dm_safe_io(&io_req_w, 1, &region_w, NULL, thread));
 
         mempool_free(region_w.rvec, cache->buf_1_pool);
         mempool_free(buf, cache->buf_8_pool);       
@@ -298,98 +581,83 @@ void flush_meta(struct wb_cache *cache, struct cache_entry *ce)
 /*
  * flush ce of partial dirty, first of all, read from cache-device, and then write to origin-device
  */
-#if 0
-static void flush_cache(struct wb_cache *cache, struct cache_entry *ce, bool thread)
+static void flush_cache_entry(struct wb_cache *cache, struct policy_operation *pop, struct cache_entry *ce)
 {
 	struct wb_device *wb = cache->wb;
-        struct metablock *mb = ce->mb;
-        u8 dirty_bits = mb->dirty_bits;
-        sector_t cblock = ce->cblock;
-	int r;        
+        struct sub_entry *se = &ce->se;                
+        struct dm_io_request io_req_r, io_req_w;
+        struct dm_io_region region_r, region_w;
+        void *buf;
+        u8 dflags = ce->dflags;
+        u8 vflags = ce->vflags;
+        u32 r;
+        int tag;
 
-	if (!dirty_bits)
-		return;
+        printk(KERN_INFO"%s - dflags:%d, vflags%d", __FUNCTION__, dflags, vflags);
 
-	if (dirty_bits == 255) {
-		void *buf = mempool_alloc(cache->buf_8_pool, GFP_NOIO);
-		struct dm_io_request io_req_r, io_req_w;
-		struct dm_io_region region_r, region_w;
+        buf = mempool_alloc(cache->buf_8_pool, GFP_NOIO);
 
-		io_req_r = (struct dm_io_request) {
-			.client = wb_io_client,
-			.bi_rw = READ,
-			.notify.fn = NULL,
-			.mem.type = DM_IO_KMEM,
-			.mem.ptr.addr = buf,
-		};
-		region_r = (struct dm_io_region) {
-			.bdev = cache->device->bdev,
-			.sector = cblock,
-			.count = (1 << 3),
-		};
-		RETRY(dm_safe_io(&io_req_r, 1, &region_r, NULL, thread));
+        policy_remove_mapping(pop, ce);                        
 
-		io_req_w = (struct dm_io_request) {
-			.client = wb_io_client,
-			.bi_rw = WRITE_FUA,
-			.notify.fn = NULL,
-			.mem.type = DM_IO_KMEM,
-			.mem.ptr.addr = buf,
-		};
-		region_w = (struct dm_io_region) {
-			.bdev = wb->device->bdev,
-			.sector = mb->oblock,
-			.count = (1 << 3),
-		};
-		RETRY(dm_safe_io(&io_req_w, 1, &region_w, NULL, thread));
+        for(tag = 0; tag < 4; tag++) {
+                if(dflags & (1 << tag) && vflags & (1 << tag)) {        
+                        io_req_r = (struct dm_io_request) {
+                                .client = wb_io_client,
+                                .bi_rw = READ,
+                                .notify.fn = NULL,
+                                .mem.type = DM_IO_KMEM,
+                                .mem.ptr.addr = buf,
+                        };
+                        region_r = (struct dm_io_region) {
+                                .bdev = cache->device->bdev,
+                                .sector = ce->cblock + (cache->sectors_per_page * tag),
+                                .count = (1 << 3),
+                                .rvec_count = 0,
+                        };
+                        RETRY(dm_safe_io(&io_req_r, 1, &region_r, NULL, true));
 
-		mempool_free(buf, cache->buf_8_pool);
-	} else {
-		void *buf = mempool_alloc(cache->buf_1_pool, GFP_NOIO);
-		size_t i;
-                
-		for (i = 0; i < 8; i++) {
-			bool bit_on = dirty_bits & (1 << i);
-			struct dm_io_request io_req_r, io_req_w;
-			struct dm_io_region region_r, region_w;
-			sector_t src;
+                        io_req_w = (struct dm_io_request) {
+                                .client = wb_io_client,
+                                .bi_rw = WRITE_FUA,
+                                .notify.fn = NULL,
+                                .mem.type = DM_IO_KMEM,
+                                .mem.ptr.addr = buf,
+                        };
+                        region_w = (struct dm_io_region) {
+                                .bdev = wb->device->bdev, 
+                                .sector = ce->oblock + (cache->sectors_per_page * tag),
+                                .count = (1 << 3),
+                                .rvec_count = 0,
+                        };
 
-			if (!bit_on)
-				continue;
+                        RETRY(dm_safe_io(&io_req_w, 1, &region_w, NULL, true));
 
-			io_req_r = (struct dm_io_request) {
-				.client = wb_io_client,
-				.bi_rw = READ,
-				.notify.fn = NULL,
-				.mem.type = DM_IO_KMEM,
-				.mem.ptr.addr = buf,
-			};
-			/* A tmp variable just to avoid 80 cols rule */
-			src = cblock + i;
-			region_r = (struct dm_io_region) {
-				.bdev = cache->device->bdev,
-				.sector = src,
-				.count = 1,
-			};
-			RETRY(dm_safe_io(&io_req_r, 1, &region_r, NULL, thread));
+                        se->tag = tag;
+                        policy_clear_dirty(pop, ce);
+                        policy_clear_valid(pop, ce);                                        
+                        printk(KERN_INFO"%s - flush a sub entry, oblock:%d", __FUNCTION__, ce->oblock + (cache->sectors_per_page * tag));
 
-			io_req_w = (struct dm_io_request) {
-				.client = wb_io_client,
-				.bi_rw = WRITE,
-				.notify.fn = NULL,
-				.mem.type = DM_IO_KMEM,
-				.mem.ptr.addr = buf,
-			};
-			region_w = (struct dm_io_region) {
-				.bdev = wb->device->bdev,
-				.sector = mb->oblock + 1 * i,
-				.count = 1,
-			};
-                        printk(KERN_INFO"read cblock:%lld, write oblock:%lld",src, region_w.sector);
-			RETRY(dm_safe_io(&io_req_w, 1, &region_w, NULL, thread));
-		}
-		mempool_free(buf, cache->buf_1_pool);
-	}
+                }
+
+        }
+
+        mempool_free(buf, cache->buf_8_pool);
+        flush_meta(cache, ce, 1); /* meta has to write on end_io of data */
+
+
+}
+#if 0
+static void remap_to_origin(struct wb_cache *cache, struct bio *bio)
+{
+	struct dm_dev *orig = cache->wb->device;
+	bio->bi_bdev = orig->bdev;
+}
+
+static void remap_to_cache(struct wb_cache *cache, struct bio *bio, sector_t sector)
+{
+	struct dm_dev *cache = cache->device;
+	bio->bi_bdev = dev->bdev;
+	bio->bi_sector = sector;        
 }
 #endif
 
@@ -403,31 +671,32 @@ static dm_oblock_t get_bio_block(struct wb_cache *cache, struct bio *bio)
 {
 	dm_block_t block_nr = (dm_block_t)bio->bi_sector;
 
-        //        do_div(block_nr, 1 << cache->block_size_order) * (1 << cache->block_size_order);
-
         return to_oblock(block_nr);
 }
 
 static int keepfast_map(struct dm_target *ti, struct bio *bio)
 {
-	struct segment_header *uninitialized_var(seg);
-        struct cache_entry ce;
-	struct per_bio_data *map_context;
-	sector_t bio_count;
-	u8 bio_offset;
-	u32 tmp32;
-	bool bio_fullsize = 0;
-	int rw;
-        u8 dirty_bits = 0;
-
 	struct wb_device *wb = ti->private;
 	struct wb_cache *cache = wb->cache;
-	struct dm_dev *orig = wb->device;
-
+        struct cache_stats *stats = &cache->stats;
+	struct dm_dev *orig = wb->device;        
+	struct segment_header *uninitialized_var(seg);
+        struct cache_entry ce = {0, };
+	struct per_bio_data *map_context;
         struct policy_operation *pop = cache->pop;
         enum policy_operation_result presult;
         dm_oblock_t oblock;
-        struct sub_entry *se;
+        struct sub_entry *se;        
+	sector_t bio_count;
+	u8 bio_offset;
+	u32 tmp32;
+	bool bio_full = 0;
+        bool is_partial;
+	int rw;
+        u8 dirty_bits = 0;
+        int i;
+        u8 dflags_restore = 0;
+        int replacing = 0;
 
 	if (ACCESS_ONCE(wb->blockup))
 		return -EIO;
@@ -447,7 +716,10 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 	 * and that's enough for discarding blocks.
 	 */
 	if (bio->bi_rw & REQ_DISCARD) {
+                oblock = get_bio_block(cache, bio);                
+                printk(KERN_INFO"%s - DISCARD %d remap to origin", __FUNCTION__, oblock);                
 		bio_remap(bio, orig, bio->bi_sector);
+                atomic64_inc(&stats->bypass);
 		return DM_MAPIO_REMAPPED;
 	}
 
@@ -461,151 +733,215 @@ static int keepfast_map(struct dm_target *ti, struct bio *bio)
 	if (bio->bi_rw & REQ_FLUSH) {
 		BUG_ON(bio->bi_size);
                 bio_remap(bio, orig, bio->bi_sector);
+                atomic64_inc(&stats->bypass);
 		return DM_MAPIO_REMAPPED;
         }
 
         rw = bio_data_dir(bio);
 #if 0
         if(rw) {
-                if(!(bio->bi_rw & (REQ_META | REQ_HOT))) {
+                if((bio->bi_rw & (REQ_META | REQ_HOT))) {
                         bio_remap(bio, orig, bio->bi_sector);
+                        atomic64_inc(&stats->bypass);
                         return DM_MAPIO_REMAPPED;
                 }
-       }        
+        }        
 #endif
-
+#if 0
         if(bio->bi_rw & REQ_FUA) {
+                oblock = get_bio_block(cache, bio);                
+                printk(KERN_INFO"%s - FUA %d remap to origin", __FUNCTION__, oblock);
+                
                 bio_remap(bio, orig, bio->bi_sector);
+                atomic64_inc(&stats->bypass);                
                 return DM_MAPIO_REMAPPED;
         }
-
+#endif
 	bio_count = bio->bi_size >> SECTOR_SHIFT;
-	bio_fullsize = (bio_count == (1 << 3));
-
-        if(!bio_fullsize) {
-                printk(KERN_INFO"no fullsize:%lld", bio_count);
-                bio_remap(bio, orig, bio->bi_sector);
-                return DM_MAPIO_REMAPPED;
-        }
+	bio_full = (bio_count == (1 << 3));
         
 	div_u64_rem(bio->bi_sector, 1 << 3, &tmp32);
 	bio_offset = tmp32;
+
+	for (i = bio_offset; i < (bio_offset + bio_count); i++)
+                dirty_bits += (1 << i);        
 
 	rw = bio_data_dir(bio);
 
         oblock = get_bio_block(cache, bio);
 
-	/*
-	 * (Locking)
-	 * Why mutex?
-	 *
-	 * The reason we use mutex instead of rw_semaphore
-	 * that can allow truely concurrent read access
-	 * is that mutex is even lighter than rw_semaphore.
-	 * Since dm-writebuffer is a real performance centric software
-	 * the overhead of rw_semaphore is crucial.
-	 * All in all,
-	 * since exclusive region in read path is enough small
-	 * and cheap, using rw_semaphore and let the reads
-	 * liexecute concurrently won't improve the performance
-	 * as much as one expects.
-	 */
-	mutex_lock(&cache->io_lock);
-        presult = policy_lookup(pop, oblock, &ce);
+        is_partial = (!bio_full || bio_offset);
 
-        //	inc_stat(cache, rw, found, bio_count);
-        //        kfdebug("cache stat:RM:%d, WM:%d, RH:%d, WH:%d", (int)cache->stat[0], (unsigned int)cache->stat[1], (unsigned int)cache->stat[2], (unsigned int)cache->stat[3]);
+	mutex_lock(&cache->io_lock);
+
+        presult = policy_map(pop, oblock, &ce);
+
         se = &ce.se;
+
+#if 1
+        if(is_partial) {
+		mutex_unlock(&cache->io_lock);                
+                if(presult == POLICY_HIT) {
+                        if(se->vflag)  {
+                                printk(KERN_INFO"partial hit");
+                                flush_cache_entry(cache, pop, &ce);
+                        } else {
+                                printk(KERN_INFO"partial invalid");
+                        }
+                        
+                        atomic_dec(&ce.seg->nr_inflight_ios);
+                        rw == 0 ? atomic64_inc(&stats->rhit) : atomic64_inc(&stats->whit);
+                } else {
+                        printk(KERN_INFO"partial miss");
+                        rw == 0 ? atomic64_inc(&stats->rmiss) : atomic64_inc(&stats->wmiss);
+                }
+                
+                bio_remap(bio, orig, oblock);
+
+                printk(KERN_INFO"%s - rw:%d partial sector:%lld (ofs:%d, biocnt:%lld), v:%d, d:%d",
+                       __FUNCTION__, rw, bio->bi_sector, bio_offset, bio_count, se->vflag, se->dflag);
+
+                return DM_MAPIO_REMAPPED;
+        }
+#endif
         
 	if (!rw) { /* READ */
-		mutex_unlock(&cache->io_lock);
+                int ios_nr;
+
+                presult == POLICY_HIT ? atomic64_inc(&stats->rhit) : atomic64_inc(&stats->rmiss);
 
                 if(presult == POLICY_MISS) {
-                        printk(KERN_INFO"R(%lld, %lld) - missed", bio_count, bio->bi_sector);
-			bio_remap(bio, orig, bio->bi_sector);
-                        
-			return DM_MAPIO_REMAPPED;
-		} else if(presult == POLICY_HIT) {
-                        if(!se->vflag) {
-                                printk(KERN_INFO"R(%lld, %lld) - invalid", bio_count, bio->bi_sector);                                
-                                inc_op_stat(cache, STAT_OP_INV, dirty_bits);
-                                trace_keepfast_op(ce.seg, ce.mb, STAT_OP_INV);
-                                atomic_dec(&ce.seg->nr_inflight_ios);
-                                bio_remap(bio, orig, bio->bi_sector);
-                                
-                                return DM_MAPIO_REMAPPED;
-                        } else {
-                                printk(KERN_INFO"R(%lld, %lld) - hit, readfrom:%d", bio_count, bio->bi_sector, se->cblock + bio_offset);
-                                bio_remap(bio,
-                                          cache->device,
-                                          se->cblock + bio_offset);
-                                map_context->ptr = ce.seg;
-                                //TRACING
-                                trace_keepfast_op(ce.seg, ce.mb, STAT_OP_READ);
-                        }
+                        trace_keepfast_op(&ce, 1);
+                        atomic64_inc(&stats->rmiss);                        
+                        kfdebug("%s - R(%lld, %d) - missed",
+                               __FUNCTION__, bio_count, oblock);
 
-                        return DM_MAPIO_REMAPPED;
-                }
-	} else {  /* WRITE */
-                if(presult == POLICY_HIT) {
-                        if(!se->vflag) {
-                                //                                policy_insert_mapping(pop, oblock, &ce);                                
-                                policy_set_valid(pop, &ce);
-                        }
-                        
-                        //check threshold
-                        try_lru_put_hot(pop, &ce);
-                } else if(presult == POLICY_MISS)  {
                         alloc_cache_entry(pop, &ce);
                         policy_insert_mapping(pop, oblock, &ce);
-                        policy_set_valid(pop, &ce);
+                        policy_set_flag(pop, &ce);
+
+                        mutex_unlock(&cache->io_lock);                        
+
+                        map_context->cache = cache;
+                        map_context->ptr = ce.seg;               
+                        map_context->cblock = se->cblock;
+                        defer_bio(cache, bio);
+
+                        return DM_MAPIO_SUBMITTED;
+		} else if(presult == POLICY_HIT)         //when it's hit, segment could be current flush segment.
+                                try_lru_put_hot(pop, &ce);
+                else if(presult == POLICY_REPLACE) {
+                        printk(KERN_INFO"%s - read io(%d) is waiting flush io count to be 0\n", __FUNCTION__, oblock);
+                        wait_event_interruptible(ce.seg->flush_wait_queue,
+                                                 atomic_read(&ce.seg->flush_io_count) == 0);
+                }
+
+                if(!se->vflag) {
+                        trace_keepfast_op(&ce, 2);
+                        kfdebug("%s - R(%lld, %lld) - invalid", __FUNCTION__, bio_count, bio->bi_sector);
+                        //    atomic_dec(&ce.seg->nr_inflight_ios); TODO : move to do_worker
+                        atomic64_inc(&stats->rmiss);
+                                
+                        if(se->dflag) {
+                                printk(KERN_INFO"%s - read io is waiting to be cleaned(oblock:%d)\n", __FUNCTION__, oblock);
+                                wait_for_cleaned(pop, &ce);
+                        }
+
+                        try_lru_put_hot(pop, &ce);                        
+                        policy_set_flag(pop, &ce);
+
+                        mutex_unlock(&cache->io_lock);                                                
+                        
+                        map_context->cache = cache;
+                        map_context->ptr = ce.seg;                                               
+                        map_context->cblock = se->cblock;
+                        defer_bio(cache, bio);
+
+                        return DM_MAPIO_SUBMITTED;                                
+                }
+
+                mutex_unlock(&cache->io_lock);                                                                
+
+                trace_keepfast_op(&ce, 0);
+                atomic64_inc(&stats->rhit);                
+                kfdebug("%s - R(%lld, %d) - hit, readfrom:%d, seg startsec:%d",
+                        __FUNCTION__, bio_count, oblock, se->cblock + bio_offset, ce.seg->start_sector);
+                
+                bio_remap(bio,
+                          cache->device,
+                          (sector_t)(se->cblock + bio_offset));
+                map_context->ptr = ce.seg;
+
+                return DM_MAPIO_REMAPPED;
+        } else {  /* WRITE */
+                if(presult == POLICY_HIT) {
+                        trace_keepfast_op(&ce, 3);
+                        atomic64_inc(&stats->whit);
+
+                        try_lru_put_hot(pop, &ce);                        
+                        policy_set_flag(pop, &ce);                                                        
+                } else if(presult == POLICY_MISS || presult == POLICY_REPLACE) {
+                        if(presult == POLICY_REPLACE) {
+                                printk(KERN_INFO"%s - replace a cache entry(oblock:%d, idx:%d, dflags:%d, vflags:%d - tag:%d, dirty:%d, valid:%d)\n",
+                                       __FUNCTION__, ce.mb->oblock_packed_d>>4, ce.mb->idx_packed_v>>4, ce.mb->oblock_packed_d & 0xf, ce.mb->idx_packed_v & 0xf, se->tag, se->dflag, se->vflag);
+                                atomic_dec(&ce.seg->nr_inflight_ios);
+                                policy_remove_mapping(pop, &ce);
+                                dflags_restore = restore_dflag(pop, &ce);
+
+                                if(se->vflag) {
+                                        policy_clear_valid(pop, &ce);
+                                        printk(KERN_INFO"%s - Clear valid bi(vflags:%d)t\n", __FUNCTION__, ce.mb->idx_packed_v&0xf);                                        
+                                }
+
+                                atomic64_inc(&stats->replace);
+                        } 
+
+                        alloc_cache_entry(pop, &ce);
+                        policy_insert_mapping(pop, oblock, &ce);
+
+                        if(presult == POLICY_REPLACE) {
+                                trace_keepfast_op(&ce, 5);
+                                set_idirty_list(pop, &ce, dflags_restore);
+                                printk(KERN_INFO"copy dflags:%d, %d of idx:%d, tag:%d, oblock:%d\n",dflags_restore, ce.mb->oblock_packed_d & 0XF, ce.mb->idx_packed_v>>4, se->tag, ce.mb->oblock_packed_d >> 4);
+                                if(dflags_restore & (1<<se->tag)) {
+                                        printk("overwrited before flush.\n");
+#if 0                                        
+                                        while(ce.mb->oblock_packed_d & (1 << se->tag))
+                                                wait_event_interruptible_timeout(ce.seg->flush_wait_queue,
+                                                                                 (ce.mb->oblock_packed_d & (1 << se->tag)) == 0,
+                                                                                 10*HZ);
+#endif                                        
+                                }
+                        } else if(presult == POLICY_MISS) {
+                                trace_keepfast_op(&ce, 4);
+                                atomic64_inc(&stats->wmiss);
+                                BUG_ON(se->dflag);                                
+                        }
+
+                        policy_set_flag(pop, &ce);                        
                 }
         }
-
-	mutex_unlock(&cache->io_lock);
-
-        policy_set_dirty(pop, &ce);
-
-        flush_meta(cache, &ce);
+                
+        mutex_unlock(&cache->io_lock);
         
+	map_context->cache = cache;
+        map_context->ptr = ce.seg;        
+        //	dm_hook_bio(&map_context->hook_info, bio, writemeta_endio, NULL);
+
+        flush_meta(cache, &ce, 1); /* meta has to write on end_io of data */        
+
+        kfdebug("W(%lld) -wseg:%d, oblock:%d, cblock:%d, idx:%d (cseg:%d inflight ios:%d)] cursor:%d, valid:%lld",
+               bio_count,
+               ce.seg->global_id  % cache->nr_segments, oblock, se->cblock, ce.mb->idx_packed_v>>4,
+               (unsigned int)cache->current_seg->global_id,
+               atomic_read(&ce.seg->nr_inflight_ios),
+               (unsigned int)cache->cursor,
+               atomic64_read(&stats->valid));
+
         bio_remap(bio, cache->device,
-                  se->cblock + bio_offset);
-        
-        trace_keepfast_op(ce.seg, ce.mb, STAT_OP_WRITE);
-        map_context->ptr = ce.seg;
+                  (sector_t)(se->cblock + bio_offset));
 
-        printk(KERN_INFO"W(%lld) - [seg id:%d inflight ios:%d, lflush:%d, Lfill:%d] cursor:%d",
-                bio_count,
-                (unsigned int)cache->current_seg->global_id,
-                atomic_read(&ce.seg->nr_inflight_ios),
-                (unsigned int)cache->last_flushed_segment_id,
-                (unsigned int)cache->last_filled_segment_id,
-                (unsigned int)cache->cursor);                        
-        
         return DM_MAPIO_REMAPPED;
-}
-
-static int keepfast_end_io(struct dm_target *ti, struct bio *bio, int error)
-{
-	struct wb_device *wb = ti->private;
-	struct wb_cache *cache = wb->cache;        
-	struct segment_header *seg;
-	struct per_bio_data *map_context =
-		dm_per_bio_data(bio, ti->per_bio_data_size);
-
-	if (!map_context->ptr) {
-		return 0;
-        }
-        
-	seg = map_context->ptr;
-	atomic_dec(&seg->nr_inflight_ios);
-
-        if(seg->last_mb_in_segment) {
-                seg->last_mb_in_segment = 0;
-		cache->last_filled_segment_id = seg->global_id;
-        }
-        
-	return 0;
 }
 
 /*
@@ -614,17 +950,32 @@ static int keepfast_end_io(struct dm_target *ti, struct bio *bio, int error)
  * [rambuf pool amount]
  */
 
+void clear_cache_stats(struct cache_stats *stats)
+{
+	atomic64_set(&stats->whit, 0);
+	atomic64_set(&stats->rhit, 0);
+	atomic64_set(&stats->wmiss, 0);
+	atomic64_set(&stats->rmiss, 0);        
+	atomic64_set(&stats->dirty, 0);
+	atomic64_set(&stats->valid, 0);
+	atomic64_set(&stats->hot, 0);        
+	atomic64_set(&stats->replace, 0);
+	atomic64_set(&stats->flush, 0);
+	atomic64_set(&stats->bypass, 0);        
+}
+
 static int keepfast_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
 	bool need_format, allow_format;
 	struct wb_device *wb = NULL;
 	struct wb_cache *cache = NULL;
+        struct cache_stats *stats;
 	struct dm_dev *origdev = NULL, *cachedev = NULL;
         unsigned long long nr_sects;                
 	unsigned long tmp = 0;
         struct mapped_device *md = dm_table_get_md(ti->table);
-	int r = 0;        
-        
+	int r = 0;
+
 	r = dm_set_target_max_io_len(ti, (1 << 3));
 	if (r) {
 		KFERR("settting max io len failed");
@@ -636,14 +987,14 @@ static int keepfast_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		KFERR("couldn't allocate wb");
 		return -ENOMEM;
 	}
-	atomic64_set(&wb->nr_dirty_caches, 0);
+
 	/*
 	 * EMC's textbook on storage system says
 	 * storage should keep its disk util less
 	 * than 70%.
 	 */
-        wb->high_flush_threshold = 90;
-	wb->low_flush_threshold = 70;
+        wb->high_flush_threshold = 0;
+	wb->low_flush_threshold = 0;
 
 	init_waitqueue_head(&wb->blockup_wait_queue);
 	wb->blockup = false;
@@ -727,16 +1078,23 @@ exit_parse_arg:
 		}
 	}
 
+        clear_cache_stats(&cache->stats);
+
 	r = resume_cache(cache, cachedev);
 	if (r) {
 		KFERR("failed to resume cache err(%d)", r);
 		goto bad_resume_cache;
 	}
-	clear_stat(cache);
+
+	cache->wq = alloc_ordered_workqueue("dm-" "keepfast", WQ_MEM_RECLAIM);
+	if (!cache->wq) {
+                goto bad_wq;
+	}        
+        INIT_WORK(&cache->worker, do_worker);
 
         r = sysfs_create_group(&disk_to_dev(dm_disk(md))->kobj, &keepfast_attr_group);
 	if (r)
-		goto bad_sysfs;        
+		goto bad_sysfs;
 
 	wb->ti = ti;
 	ti->private = wb;
@@ -765,6 +1123,7 @@ exit_parse_arg:
 	return 0;
 
 bad_sysfs:
+bad_wq:        
 bad_resume_cache:
 bad_format_cache:
 bad_audit_cache:
@@ -786,14 +1145,12 @@ static void keepfast_dtr(struct dm_target *ti)
 	struct wb_cache *cache = wb->cache;
         struct mapped_device *md = dm_table_get_md(ti->table);        
 
+
 	free_cache(cache);
 	kfree(cache);
-
         sysfs_remove_group(&disk_to_dev(dm_disk(md))->kobj, &keepfast_attr_group);
-
 	dm_put_device(wb->ti, cache->device);
 	dm_put_device(ti, wb->device);
-
 	ti->private = NULL;
 	kfree(wb);
 }
@@ -802,13 +1159,16 @@ static int keepfast_message(struct dm_target *ti, unsigned argc, char **argv)
 {
 	struct wb_device *wb = ti->private;
 	struct wb_cache *cache = wb->cache;
+        struct policy_operation *pop = cache->pop;        
         
 	char *cmd = argv[0];
 	unsigned long tmp;
 
+        printk(KERN_INFO"%s", __FUNCTION__);
+
 	if (!strcasecmp(cmd, "clear_stat")) {
 		struct wb_cache *cache = wb->cache;
-		clear_stat(cache);
+                //		clear_stat(cache);
 		return 0;
 	}
 
@@ -824,18 +1184,41 @@ static int keepfast_message(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	if (!strcasecmp(cmd, "allow_flush")) {
-		if (tmp > 1)
-			return -EINVAL;
 		cache->allow_flush = tmp;
 		return 0;
 	}
 
-	if (!strcasecmp(cmd, "enable_balance_dirty")) {
+	if (!strcasecmp(cmd, "repeat_flush")) {
 		if (tmp > 1)
 			return -EINVAL;
-		cache->enable_balance_dirty = tmp;
+		cache->repeat_flush = tmp;
+                cache->nr_segs_flush_region = cache->nr_segments - 2;
 		return 0;
 	}
+
+	if (!strcasecmp(cmd, "flush_region")) {
+		cache->repeat_flush = 0;
+                if(tmp > cache->nr_segments - 2)
+                        return -EINVAL;
+                cache->nr_segs_flush_region = tmp;
+		return 0;
+	}        
+
+	if (!strcasecmp(cmd, "check_flags")) {
+		if (tmp > 1)
+			return -EINVAL;
+
+                check_flags(pop);
+
+		return 0;
+	}        
+
+	if (!strcasecmp(cmd, "run_around")) {
+		if (tmp > 1)
+			return -EINVAL;
+                run_around_segment(pop);
+		return 0;
+	}        
 
 	if (!strcasecmp(cmd, "barrier_deadline_ms")) {
 		if (tmp < 1)
@@ -854,16 +1237,6 @@ static int keepfast_message(struct dm_target *ti, unsigned argc, char **argv)
 	if (!strcasecmp(cmd, "flush_threshold")) {
 		wb->high_flush_threshold = tmp;
                 wb->low_flush_threshold = tmp / 2;
-		return 0;
-	}
-
-	if (!strcasecmp(cmd, "flush_sb_interval")) {
-		cache->flush_sb_interval = tmp;
-		return 0;
-	}
-
-	if (!strcasecmp(cmd, "sync_interval")) {
-		cache->sync_interval = tmp;
 		return 0;
 	}
 
@@ -904,53 +1277,53 @@ static void keepfast_io_hints(struct dm_target *ti,
 static void keepfast_status(struct dm_target *ti, status_type_t type,
 			      unsigned flags, char *result, unsigned maxlen)
 {
-	unsigned int sz = 0;
 	struct wb_device *wb = ti->private;
-	struct wb_cache *cache = wb->cache;
-	size_t i;
+        struct wb_cache *cache = wb->cache;
+        struct cache_stats *stats = &cache->stats;
+        u32 sz = 0;
 
-	switch (type) {
-	case STATUSTYPE_INFO:
-		DMEMIT("%llu %llu %u %u %u %u ",
-		       (long long unsigned int)
-		       atomic64_read(&wb->nr_dirty_caches),
-		       (long long unsigned int)
-		       cache->nr_segments,
-		       (unsigned int)cache->last_flushed_segment_id,
-		       (unsigned int)cache->last_filled_segment_id,
-		       (unsigned int)cache->current_seg->global_id,
-		       (unsigned int)cache->cursor);
+        u64 whit = atomic64_read(&stats->whit);
+        u64 rhit = atomic64_read(&stats->rhit);
+        u64 wmiss = atomic64_read(&stats->wmiss);
+        u64 rmiss = atomic64_read(&stats->rmiss);
+        u64 flush = atomic64_read(&stats->flush);
+        u64 bypass = atomic64_read(&stats->bypass);
+        u64 replace = atomic64_read(&stats->replace);
+        u64 valid = atomic64_read(&stats->valid);
+        u64 dirty = atomic64_read(&stats->dirty);
+        u64 hot = atomic64_read(&stats->hot);
 
-		for (i = 0; i < STATLEN; i++) {
-			atomic64_t *v = &cache->stat[i];
-			DMEMIT("%llu ", (unsigned long long) atomic64_read(v));
-		}
+        DMEMIT("\n");
+        DMEMIT("%15s : %10d\n", "current seg", cache->current_seg->global_id);
+        DMEMIT("%15s : %10d\n", "victim segs", cache->nr_segs_flush_region);
+        DMEMIT("%15s : %10d\n", "batched segs", cache->nr_max_batched_flush); 
+        DMEMIT( "%15s : %10d segs\n", "segments", cache->nr_segments);
+        DMEMIT( "%15s : %10d entries\n", "cache entries",
+                cache->nr_segments * cache->nr_blocks_inseg);
+        
+        DMEMIT("%15s : %10d entries\n", "sub entries",
+               cache->nr_segments * cache->nr_blocks_inseg * cache->nr_pages_inblock);
 
-		DMEMIT("%d ", 8);
-		DMEMIT("barrier_deadline_ms %lu ",
-		       cache->barrier_deadline_ms);
-		DMEMIT("allow_flush %d ",
-		       cache->allow_flush ? 1 : 0);
-		DMEMIT("enable_balance_dirty %d ",
-		       cache->enable_balance_dirty ? 1 : 0);
-		DMEMIT("high_flush_threshold %d ",
-		       wb->high_flush_threshold);
-		DMEMIT("low_flush_threshold %d ",
-		       wb->low_flush_threshold);                
-		DMEMIT("nr_cur_batched_flush %u ",
-		       cache->nr_cur_batched_flush);
-		DMEMIT("sync_interval %lu ",
-		       cache->sync_interval);
-		DMEMIT("update_record_interval %lu ",
-		       cache->flush_sb_interval);
-		DMEMIT("blockup %d",
-		       wb->blockup ? 1 : 0);
-		break;
+        DMEMIT("%15s : %10d %% \n", "cache rate",
+               (u32)div_u64(valid * 100, cache->nr_segments * cache->nr_blocks_inseg * cache->nr_pages_inblock));        
 
-	case STATUSTYPE_TABLE:
-		DMEMIT("%s %s", wb->device->name, wb->cache->device->name);
-		break;
-	}
+        DMEMIT("%15s : %10d %% \n", "dirty rate",
+               (u32)div_u64(dirty * 100, cache->nr_segments * cache->nr_blocks_inseg * cache->nr_pages_inblock));
+        
+        DMEMIT("%15s : %10lld sentries\n", "dirty", dirty);
+        DMEMIT("%15s : %10lld sentries\n", "valid", valid);
+        DMEMIT("%15s : %10lld centries\n", "hot", hot);        
+
+        DMEMIT("%15s : %10d %% \n", "hit rate",
+               (u32)div_u64((whit + rhit + replace) * 100, whit + rhit + wmiss + rmiss + replace));        
+        DMEMIT("%15s : %10lld sentries\n", "write hit", whit);
+        DMEMIT("%15s : %10lld sentries\n", "write miss", wmiss);
+        DMEMIT("%15s : %10lld sentries\n", "read hit", rhit);
+        DMEMIT("%15s : %10lld sentries\n", "read miss", rmiss);
+        DMEMIT("%15s : %10lld sentries\n", "replace", replace);
+        
+        DMEMIT("%15s : %10lld sentries\n", "flush", flush);
+        DMEMIT("%15s : %10lld sentries\n", "bypass", bypass);
 }
 
 struct target_type keepfast_target = {

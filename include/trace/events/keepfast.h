@@ -12,37 +12,42 @@
 /* request.c */
 
 TRACE_EVENT(keepfast_op,
-            TP_PROTO(struct segment_header *seg, struct metablock *mb, int op),
-            TP_ARGS(seg, mb, op),
+            TP_PROTO(struct cache_entry *ce, int op),
+            TP_ARGS(ce, op),
 
             TP_STRUCT__entry(
-                    __field(u32,	oblock_packed_d			)
-                    __field(u64,	        seg_id      		)
-                    __field(u32,	        hit_count      		)
-                    __field(u8,	        idx_packed_v		)
+                    __field(u32,	seg   )    
+                    __field(u32,        idx      	)
+                    __field(u32,	oblock      		)
+                    __field(u32,        cblock		        )
                     __field(u8,	        op      		)
             ),
 
             TP_fast_assign(
-                    __entry->seg_id		= seg->global_id;
-                    __entry->oblock_packed_d		= mb->oblock_packed_d;
-                    __entry->hit_count	        = mb->hit_count;
-                    __entry->idx_packed_v     = mb->idx_packed_v;
+                           __entry->seg	= ce->seg ? ce->seg->global_id : -1;
+                           __entry->idx	= ce->mb ? ce->mb->idx_packed_v>>4 : -1;
+                           __entry->oblock     = ce->se.oblock;
+                           __entry->cblock     = ce->mb ? ce->se.cblock : ce->cblock;                    
                     __entry->op             = op;
             ),
             
-            TP_printk("seg_id=%llu mb_id=%d sector=%llu op=%c",
-                    (u64)__entry->seg_id,
-                    (u32)__entry->oblock_packed_d,
-                    (u64)__entry->hit_count,
-                    (u32)__entry->op == 0 ? 'R' : \
-                              (u32)__entry->op == 1 ? 'W' : \
-                              (u32)__entry->op == 2 ? 'F' : \
-                              (u32)__entry->op == 3 ? 'I' : \
-                              (u32)__entry->op == 4 ? 'B' : 'X'
+            TP_printk("seg_id=%d idx=%d oblock=%d cblock=%d %s",
+                      __entry->seg,
+                      __entry->idx,
+                      __entry->oblock,
+                      __entry->cblock,
+                    __entry->op == 0 ? "Read-hit" : \
+                              (u32)__entry->op == 1 ? "Read-miss" : \
+                              (u32)__entry->op == 2 ? "Read-inv" : \
+                              (u32)__entry->op == 3 ? "Write-hit" : \
+                              (u32)__entry->op == 4 ? "Write-miss" : \
+                              (u32)__entry->op == 5 ? "Write-replace" : \
+                              (u32)__entry->op == 6 ? "Flush" : \
+                              (u32)__entry->op == 5 ? "I" : \
+                              (u32)__entry->op == 6 ? "B" : "X"
                       )
 );
-
+#if 0
 TRACE_EVENT(keepfast_recovery,
             TP_PROTO(struct segment_header_device *segdev, struct metablock_device *mbdev, int i),
             TP_ARGS(segdev, mbdev, i),
@@ -68,7 +73,7 @@ TRACE_EVENT(keepfast_recovery,
                     (u8)__entry->idx_packed_v
                       )
 );
-
+#endif
 #endif /* _TRACE_KEEPFAST_H */
 
 /* This part must be outside protection */

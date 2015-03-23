@@ -121,9 +121,7 @@ struct policy_operation {
 	 *
 	 * May only return 0, or -EWOULDBLOCK (if !can_migrate)
 	 */
-	int (*map)(struct policy_operation *pop, dm_oblock_t oblock,
-		   bool can_block, bool can_migrate, bool discarded_oblock,
-		   struct bio *bio, struct policy_result *result);
+	int (*map)(struct policy_operation *pop, dm_oblock_t oblock, struct cache_entry *ce);        
 
 	/*
 	 * Sometimes we want to see if a block is in the cache, without
@@ -135,6 +133,8 @@ struct policy_operation {
 	 * (-EWOULDBLOCK would be typical).
 	 */
 	int (*lookup)(struct policy_operation *pop, dm_oblock_t oblock, struct cache_entry *ce);
+
+	void (*set_flag)(struct policy_operation *pop, struct cache_entry *ce);        
 
 	void (*set_valid)(struct policy_operation *pop, struct cache_entry *ce);
 	void (*clear_valid)(struct policy_operation *pop, struct cache_entry *ce);        
@@ -252,11 +252,24 @@ extern void alloc_cache_entry(struct policy_operation *pop, struct cache_entry *
 extern bool policy_bytealign;
 extern bool policy_overwrite;
 extern int try_lru_put_hot(struct policy_operation *pop, struct cache_entry *ce);
-extern  void unpack_dflag(u32 value_le, dm_block_t *block, u8 *dflag);
-extern __le32 pack_dflag(dm_block_t block, u8 dflag);
-extern void unpack_vflag(__le32 value_le, u32 *idx, u8 *vflag);
-extern __le32 pack_vflag(u32 idx, u8 vflag);
+//extern void get_cache_entry_info(struct policy_operation *pop, struct cache_entry *ce);
+extern void get_entry_and_clear_dirty(struct policy_operation *pop, struct cache_entry *ce);
+extern  void unpack_dflag(u32 value, dm_block_t *block, u8 *dflag);
+extern u32 pack_dflag(dm_block_t block, u8 dflag);
+extern void unpack_vflag(u32 value_le, u32 *idx, u8 *vflag);
+extern void pack_vflag(u32 *value, u8 vflag);
 
+extern int entry_is_hot(struct policy_operation *pop, struct cache_entry *ce);
+extern u32 count_flag(struct policy_operation *pop, u8 flag);
+extern void set_idirty_list(struct policy_operation *pop, struct cache_entry *ce, u8 dflags);
+extern void clear_idirty_list(struct policy_operation *pop);
+extern void wait_for_cleaned(struct policy_operation *pop, struct cache_entry *ce);
+extern u8 restore_dflag(struct policy_operation *pop, struct cache_entry *ce);
+extern void run_around_segment(struct policy_operation *pop);
+extern void check_flags(struct policy_operation *pop);
+extern void snapshot_cache_entry_info(struct policy_operation *pop, struct cache_entry *ce, u8 *dflags_snapshot, u8 *vflags_snapshot, u8 *hot_snapshot);
+extern struct metablock *get_unsync_entry(struct policy_operation *pop, struct cache_entry *ce);
+extern struct segment_header *set_current_flush_seg(struct policy_operation *pop, struct cache_entry *ce);
 /*----------------------------------------------------------------*/
 
 #endif	/* DM_CACHE_POLICY_H */

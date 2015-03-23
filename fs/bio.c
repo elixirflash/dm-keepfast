@@ -257,6 +257,8 @@ void bio_init(struct bio *bio)
 	bio->bi_flags = 1 << BIO_UPTODATE;
 	bio->bi_comp_cpu = -1;
 	atomic_set(&bio->bi_cnt, 1);
+	atomic_set(&bio->bi_remaining, 1);        
+        
 }
 EXPORT_SYMBOL(bio_init);
 
@@ -1440,10 +1442,15 @@ EXPORT_SYMBOL(bio_flush_dcache_pages);
  **/
 void bio_endio(struct bio *bio, int error)
 {
+
+        BUG_ON(atomic_read(&bio->bi_remaining) <= 0);        
 	if (error)
 		clear_bit(BIO_UPTODATE, &bio->bi_flags);
 	else if (!test_bit(BIO_UPTODATE, &bio->bi_flags))
 		error = -EIO;
+
+        if (!atomic_dec_and_test(&bio->bi_remaining))
+                return;        
 
 	if (bio->bi_end_io)
 		bio->bi_end_io(bio, error);

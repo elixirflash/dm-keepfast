@@ -15,11 +15,11 @@
 /*
  * Little inline functions that simplify calling the policy methods.
  */
-static inline int policy_map(struct policy_operation *pop, dm_oblock_t oblock,
-			     bool can_block, bool can_migrate, bool discarded_oblock,
-			     struct bio *bio, struct policy_result *result)
+
+static inline int policy_map(struct policy_operation *pop, dm_oblock_t oblock, struct cache_entry *centry)
 {
-	return pop->map(pop, oblock, can_block, can_migrate, discarded_oblock, bio, result);
+	BUG_ON(!pop->map);
+	return pop->map(pop, oblock, centry);
 }
 
 static inline int policy_lookup(struct policy_operation *pop, dm_oblock_t oblock, struct cache_entry *centry)
@@ -28,10 +28,22 @@ static inline int policy_lookup(struct policy_operation *pop, dm_oblock_t oblock
 	return pop->lookup(pop, oblock, centry);
 }
 
+static inline void policy_set_flag(struct policy_operation *pop, struct cache_entry *centry)
+{
+	if (pop->set_flag)
+		pop->set_flag(pop, centry);        
+}
+
 static inline void policy_set_valid(struct policy_operation *pop, struct cache_entry *centry)
 {
 	if (pop->set_valid)
 		pop->set_valid(pop, centry);        
+}
+
+static inline void policy_clear_valid(struct policy_operation *pop, struct cache_entry *centry)
+{
+	if (pop->clear_valid)
+		pop->clear_valid(pop, centry);
 }
 
 static inline void policy_set_dirty(struct policy_operation *pop, struct cache_entry *centry)

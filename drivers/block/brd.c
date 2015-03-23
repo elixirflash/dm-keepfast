@@ -277,7 +277,8 @@ static void copy_to_brd(struct brd_device *brd, struct bio_vec *bvec, const void
                                src + rvec[rvec_idx].rv_offset, rvec[rvec_idx].rv_len);
                 }
         } else
-                memcpy(dst + sector_offset, src, copy);                
+                memcpy(dst + sector_offset, src, copy);
+
 
 	kunmap_atomic(dst, KM_USER1);        
 
@@ -335,12 +336,11 @@ static void copy_from_brd(struct brd_device *brd, struct bio_vec *bvec, void *ds
                         }
                 } else
                         memcpy(dst, src + sector_offset, copy);
-                
-                if(sector == 2048)
-                        printk(KERN_INFO"page phys:%x,read segid:%lld",(unsigned int)page_to_phys(page), *(unsigned long long *)(src+sector_offset));                
+
 		kunmap_atomic(src, KM_USER1);
 	} else
 		memset(dst, 0, copy);
+
 
 	if (copy < n) {
 		dst += copy;

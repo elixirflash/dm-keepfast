@@ -1483,6 +1483,7 @@ static void _dm_request(struct request_queue *q, struct bio *bio)
 	}
 
 	__split_and_process_bio(md, bio);
+
 	up_read(&md->io_lock);
 	return;
 }

@@ -26,6 +26,7 @@
 #include <linux/dm-io.h>
 
 #include "./dm-keepfast-blocktype.h"
+#include "../dm-bio-record.h"
 
 extern int kf_debug;
 
@@ -72,10 +73,18 @@ extern int kf_debug;
   * "WBst"
   */
 #define KEEPFAST_MAGIC 0x57427374
+/*
+struct partial_dflag_array _pd_array {
+        u32 key;
+        u32 dflag;
+        };*/
+
 struct superblock_device {
 	__le32 magic;
 	u8 segment_size_order;
-	__le32 last_flushed_segment_id;        
+	__le32 last_flushed_segment_id;
+        u32 pd_array_idx;
+        //	struct partial_dflag_array pd_array[10];
 } __packed;
 
 /*
@@ -86,7 +95,8 @@ struct superblock_device {
  */
 struct metablock {
         u32 oblock_packed_d; /* with dirty flag */
-        u32 idx_packed_v;    /* with valid flag */        
+        u32 idx_packed_v;    /* with valid flag */
+        u8 partial_dflag;
         u32 hit_count;
 
 	struct hlist_node ht_list;
@@ -103,6 +113,7 @@ struct metablock {
 struct metablock_device {
 	__le32 oblock_packed_d; /* with dirty flag */
         u32 idx_packed_v; /* with valid flag */
+        u8 partial_dirty_bits;
         u32 hit_count;
 	u8 padding[16 - (8 + 1 + 4)];
 } __packed;
@@ -116,31 +127,22 @@ struct segment_header {
 	 */
 	u32 global_id;
 
-	/*
-	 * Segment can be flushed half-done.
-	 * length is the number of
-	 * metablocks that must be counted in
-	 * in resuming.
-	 */
-	u8 length;
-
 	u32 start_idx; /* Const */
         dm_cblock_t start_sector; /* Const */
 
 	struct list_head flush_list;
 
-        bool last_mb_in_segment;        
+        bool last_mb_in_segment;
 
 	/*
 	 * This segment can not be overwritten
 	 * until flushd.
 	 */
 	struct completion flush_done;
-
-	spinlock_t lock;
-
+	atomic_t flush_io_count;
+	wait_queue_head_t flush_wait_queue;
+	atomic_t flush_fail_count;        
 	atomic_t nr_inflight_ios;
-
 	struct metablock mb_array[0];
 };
 
@@ -176,7 +178,7 @@ struct cache_entry {
         struct segment_header *seg;
         struct metablock *mb;
 
-        dm_oblock_t oblock; //for debugging
+        dm_oblock_t oblock; 
         dm_cblock_t cblock;
         u32 idx;
         u8 set_partial_dirty;
@@ -189,27 +191,27 @@ struct cache_entry {
                 u8 vflag;
                 u8 dflag;                
                 dm_oblock_t oblock;
-                dm_cblock_t cblock;                
+                dm_cblock_t cblock;
+                u8 unaligned;
         } se;
-
 };
 
 #define INIT_CACHE_ENTRY(x) x = {0, }
 
-#define STAT_OP_READ        0
-#define STAT_OP_WRITE       1
-#define STAT_OP_FLUSH       2
-#define STAT_OP_INV         3
-#define STAT_OP_BYPASS      4
-#define STAT_OP_LEN         5
+struct cache_stats {
+        atomic64_t whit;
+        atomic64_t rhit;
+        atomic64_t wmiss;
+        atomic64_t rmiss;
 
-enum STATFLAG {
-	STAT_HIT = 0,        
-	STAT_WRITE,
-	STAT_FULLSIZE,
-        STAT_EOF
+        atomic64_t dirty;
+        atomic64_t valid;
+        atomic64_t hot;
+
+        atomic64_t bypass;
+        atomic64_t flush;
+        atomic64_t replace;
 };
-#define STATLEN (1 << STAT_EOF)
 
 struct lookup_key {
 	sector_t sector;
@@ -259,10 +261,17 @@ struct wb_cache {
 	u32 cursor; /* Index that has been written the most lately */
 	spinlock_t cursor_lock;        
 	struct segment_header *current_seg;
+	struct segment_header *current_flush_seg;
+	struct segment_header *last_flush_seg;
 
-	u32 last_flushed_segment_id;
+	atomic_t current_flush_seg_id;        
+	atomic_t last_flushed_segment_id;
 	u32 last_filled_segment_id;
 	int urge_flush;
+        int invalidate_over;
+
+	struct bio_list deferred_readthrough_bios;
+        struct bio_list deferred_bios;
 
 	/*
 	 * Flush thread
@@ -274,7 +283,16 @@ struct wb_cache {
 	struct task_struct *flush_thread;
 	spinlock_t flush_queue_lock;
 	struct list_head flush_queue;
-	int allow_flush; /* param */        
+	int allow_flush; /* param */
+        int repeat_flush;
+        u32 flush_seg;
+
+	struct workqueue_struct *wq;        
+	struct work_struct worker;
+	spinlock_t lock;        
+
+        u32 pd_array_idx;
+        //	struct partial_dflag_array pd_array[10];
 
 	/*
 	 * Deferred ACK for barriers.
@@ -292,43 +310,16 @@ struct wb_cache {
 	 */
 	wait_queue_head_t flush_wait_queue;
 	atomic_t flush_fail_count;
-	atomic_t flush_io_count;
 	struct list_head flush_list;
-	u8 *dirtiness_snapshot;
+	u8 *dflags_snapshot;
+	u8 *vflags_snapshot;
+	u8 *hot_snapshot;        
 	void *flush_buffer;
 	u32 nr_cur_batched_flush;
+        u32 nr_segs_flush_region;
 	u32 nr_max_batched_flush; /* param */
 
-	/*
-	 * Flush modulator
-	 *
-	 * This thread turns on and off
-	 * the flush
-	 * according to the load of backing store.
-	 */
-	struct task_struct *balance_dirty_thread;
-	int enable_balance_dirty; /* param */
-
-	/*
-	 * Superblock Recorder
-	 *
-	 * Update the superblock record
-	 * periodically.
-	 */
-	struct task_struct *flush_sb_thread;
-	unsigned long flush_sb_interval; /* param */
-
-	/*
-	 * Cache Synchronizer
-	 *
-	 * Sync the dirty writes
-	 * periodically.
-	 */
-	struct task_struct *sync_thread;
-	unsigned long sync_interval; /* param */
-
-	atomic64_t stat[STATLEN];
-	atomic64_t op_stat[STAT_OP_LEN];        
+        struct cache_stats stats;        
 };
 
 struct wb_device {
@@ -358,10 +349,6 @@ struct flush_job {
 	 * List of bios with barrier flags.
 	 */
 	struct bio_list barrier_ios;
-};
-
-struct per_bio_data {
-	void *ptr;
 };
 
 /*----------------------------------------------------------------*/
@@ -438,6 +425,8 @@ void inc_op_stat(struct wb_cache *cache, int op, int val);
 
 void inc_nr_dirty_caches(struct wb_device *wb);
 void dec_nr_dirty_caches(struct wb_device *wb);
+
+extern void flush_meta(struct wb_cache *cache, struct cache_entry *ce, bool thread);
 
 /*----------------------------------------------------------------*/
 

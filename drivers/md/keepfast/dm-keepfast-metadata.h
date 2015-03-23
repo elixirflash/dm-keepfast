@@ -25,7 +25,7 @@ int __must_check format_cache_device(struct dm_dev *, struct wb_cache *);
 
 /*----------------------------------------------------------------*/
 
-void meta_prepare_for_write(struct wb_cache *cache, struct cache_entry *centry, struct segment_header_device *dest);
+void meta_prepare_for_write(struct wb_cache *cache, struct segment_header *seg, struct segment_header_device *dest);
 
 /*----------------------------------------------------------------*/
 
@@ -51,5 +51,7 @@ void *bigarray_at(struct bigarray *arr, u64 i);
 struct metablock *mb_at(struct wb_cache *cache, u32 idx);
 
 struct metablock *get_next_mb(struct wb_cache *cache);
+
+void print_hex(unsigned char *r_buf, unsigned int size);
 
 #endif

@@ -17,23 +17,8 @@ void queue_barrier_io(struct wb_cache *, struct bio *);
 void barrier_deadline_proc(unsigned long data);
 void flush_barrier_ios(struct work_struct *);
 
-/*----------------------------------------------------------------*/
 
-int do_flush_sb(void *);
 void wait_for_flush(struct wb_cache *, u32 id);
 
-/*----------------------------------------------------------------*/
-
-int do_balance_dirty(void *);
-
-/*----------------------------------------------------------------*/
-
-int sync_proc(void *);
-
-/*----------------------------------------------------------------*/
-
-int recorder_proc(void *);
-
-/*----------------------------------------------------------------*/
 
 #endif
