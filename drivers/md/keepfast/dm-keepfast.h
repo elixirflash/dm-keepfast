@@ -46,58 +46,22 @@ extern int kf_debug;
 
 /*
  * The Detail of the Disk Format
- *
- * Whole:
- * Superblock (1MB) + Segment + Segment ...
- * We reserve the first 1MB as the superblock.
- *
- * Superblock:
- * head <----                                     ----> tail
- * superblock header (512B) + ... + superblock record (512B)
- *
- * Segment:
- * segment_header_device (512B) +
- * metablock_device * nr_caches_inseg +
- * (aligned first 4KB region)
- * data[0] (4KB) + data{1] + ... + data{nr_cache_inseg - 1]
  */
-
-/*
- * Superblock Header
- * First one sector of the super block region.
- * The value is fixed after formatted.
- */
-
- /*
-  * Magic Number
-  * "WBst"
-  */
 #define KEEPFAST_MAGIC 0x57427374
-/*
-struct partial_dflag_array _pd_array {
-        u32 key;
-        u32 dflag;
-        };*/
+//#define UNITTEST
 
 struct superblock_device {
 	__le32 magic;
 	u8 segment_size_order;
-	__le32 last_flushed_segment_id;
-        u32 pd_array_idx;
-        //	struct partial_dflag_array pd_array[10];
 } __packed;
 
 /*
  * Metadata of a 4KB cache line
- *
- * Dirtiness is defined for each sector
- * in this cache line.
  */
 struct metablock {
         u32 oblock_packed_d; /* with dirty flag */
         u32 idx_packed_v;    /* with valid flag */
-        u8 partial_dflag;
-        u32 hit_count;
+        u8 hit_count;
 
 	struct hlist_node ht_list;
         struct list_head hot_list;
@@ -105,20 +69,17 @@ struct metablock {
 
 /*
  * On-disk metablock
- *
- * Its size must be a factor of one sector
- * to avoid starddling neighboring two sectors.
- * Facebook's flashcache does the same thing.
  */
 struct metablock_device {
 	__le32 oblock_packed_d; /* with dirty flag */
         u32 idx_packed_v; /* with valid flag */
-        u8 partial_dirty_bits;
-        u32 hit_count;
+        u8 hit_count;
 	u8 padding[16 - (8 + 1 + 4)];
 } __packed;
 
 #define SZ_MAX (~(size_t)0)
+
+#define MAX_BLOCKS_IN_SEG 64
 struct segment_header {
 	/*
 	 * ID uniformly increases.
@@ -127,12 +88,12 @@ struct segment_header {
 	 */
 	u32 global_id;
 
+
+
 	u32 start_idx; /* Const */
         dm_cblock_t start_sector; /* Const */
 
 	struct list_head flush_list;
-
-        bool last_mb_in_segment;
 
 	/*
 	 * This segment can not be overwritten
@@ -140,21 +101,15 @@ struct segment_header {
 	 */
 	struct completion flush_done;
 	atomic_t flush_io_count;
-	wait_queue_head_t flush_wait_queue;
 	atomic_t flush_fail_count;        
+        
+	wait_queue_head_t flush_wait_queue;
+
+	DECLARE_BITMAP(replace_bitmap, MAX_BLOCKS_IN_SEG);
+
 	atomic_t nr_inflight_ios;
 	struct metablock mb_array[0];
 };
-
-/*
- * (Locking)
- * Locking metablocks by their granularity
- * needs too much memory space for lock structures.
- * We only locks a metablock by locking the parent segment
- * that includes the metablock.
- */
-#define lockseg(seg, flags) spin_lock_irqsave(&(seg)->lock, flags)
-#define unlockseg(seg, flags) spin_unlock_irqrestore(&(seg)->lock, flags)
 
 /*
  * On-disk segment header.
@@ -164,12 +119,13 @@ struct segment_header {
 struct segment_header_device {
 	/* - FROM ------------------------------------ */
 	__le32 global_id;
+	DECLARE_BITMAP(replace_bitmap, MAX_BLOCKS_IN_SEG);        
 	/*
 	 * On what lap in rorating on cache device
 	 * used to find the head and tail in the
 	 * segments in cache device.
 	 */
-	u8 padding[512 - (8 + 4)]; /* 512B */
+	u8 padding[512 - (4 + BITS_TO_LONGS(MAX_BLOCKS_IN_SEG))]; /* 512B */
 	/* - TO -------------------------------------- */
 	struct metablock_device mbarr[0]; /* 16B * N */
 } __packed;
@@ -185,7 +141,7 @@ struct cache_entry {
         u8 dflags;
         u8 vflags;
         u8 hot;
-
+ 
         struct sub_entry {
                 u8 tag;
                 u8 vflag;
@@ -225,11 +181,10 @@ struct wb_device;
 struct wb_cache {
 	struct wb_device *wb;
         struct policy_operation *pop;
-
+        
 	mempool_t *buf_1_pool; /* 1 sector buffer pool */
 	mempool_t *buf_8_pool; /* 8 sector buffer pool */
-	mempool_t *flush_job_pool;
-
+        
 	struct dm_dev *device;
 	struct mutex io_lock;
 	u32 nr_blocks; /* Const */
@@ -245,7 +200,7 @@ struct wb_cache {
         u32 nr_pages;
         
 	struct bigarray *segment_header_array;
-
+        
 	/*
 	 * Chained hashtable
 	 *
@@ -257,7 +212,7 @@ struct wb_cache {
 	struct bigarray *htable;
 	size_t htsize;
 	struct ht_head *null_head;
-
+        
 	u32 cursor; /* Index that has been written the most lately */
 	spinlock_t cursor_lock;        
 	struct segment_header *current_seg;
@@ -311,9 +266,7 @@ struct wb_cache {
 	wait_queue_head_t flush_wait_queue;
 	atomic_t flush_fail_count;
 	struct list_head flush_list;
-	u8 *dflags_snapshot;
-	u8 *vflags_snapshot;
-	u8 *hot_snapshot;        
+        
 	void *flush_buffer;
 	u32 nr_cur_batched_flush;
         u32 nr_segs_flush_region;
@@ -324,31 +277,12 @@ struct wb_cache {
 
 struct wb_device {
 	struct dm_target *ti;
-
 	struct dm_dev *device;
-
 	struct wb_cache *cache;
-
-	u8 high_flush_threshold;
-	u8 low_flush_threshold;        
-
 	atomic64_t nr_dirty_caches;
 
 	wait_queue_head_t blockup_wait_queue;
 	int blockup;
-};
-
-struct flush_job {
-	struct list_head flush_queue;
-	struct segment_header *seg;
-	/*
-	 * The data to flush to cache device.
-	 */
-	struct rambuffer *rambuf;
-	/*
-	 * List of bios with barrier flags.
-	 */
-	struct bio_list barrier_ios;
 };
 
 /*----------------------------------------------------------------*/
@@ -427,7 +361,8 @@ void inc_nr_dirty_caches(struct wb_device *wb);
 void dec_nr_dirty_caches(struct wb_device *wb);
 
 extern void flush_meta(struct wb_cache *cache, struct cache_entry *ce, bool thread);
-
+void flush_seg_header(struct wb_cache *cache, struct segment_header *seg, bool thread);
+void flush_cache_entry(struct wb_cache *cache, struct policy_operation *pop, struct cache_entry *ce);
 /*----------------------------------------------------------------*/
 
 #endif

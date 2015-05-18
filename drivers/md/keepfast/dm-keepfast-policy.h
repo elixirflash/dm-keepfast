@@ -157,7 +157,7 @@ struct policy_operation {
 	 * They must succeed.
 	 */
 	void (*remove_mapping)(struct policy_operation *pop, struct cache_entry *ce);
-	void (*insert_mapping)(struct policy_operation *pop, dm_oblock_t oblock, struct cache_entry *ce);
+	int (*insert_mapping)(struct policy_operation *pop, dm_oblock_t oblock, struct cache_entry *ce);
 	void (*force_mapping)(struct policy_operation *pop, dm_oblock_t current_oblock,
 			      dm_oblock_t new_oblock);
 
@@ -250,10 +250,9 @@ extern int add_invalid_ce(struct policy_operation *pop, struct cache_entry *ce);
 extern void remove_mappings_inseg(struct policy_operation *pop, struct segment_header *seg);
 extern void alloc_cache_entry(struct policy_operation *pop, struct cache_entry *ce);
 extern bool policy_bytealign;
-extern bool policy_overwrite;
 extern int try_lru_put_hot(struct policy_operation *pop, struct cache_entry *ce);
 //extern void get_cache_entry_info(struct policy_operation *pop, struct cache_entry *ce);
-extern void get_entry_and_clear_dirty(struct policy_operation *pop, struct cache_entry *ce);
+extern int get_entry_and_clear_dirty(struct policy_operation *pop, struct cache_entry *ce);
 extern  void unpack_dflag(u32 value, dm_block_t *block, u8 *dflag);
 extern u32 pack_dflag(dm_block_t block, u8 dflag);
 extern void unpack_vflag(u32 value_le, u32 *idx, u8 *vflag);
@@ -261,8 +260,8 @@ extern void pack_vflag(u32 *value, u8 vflag);
 
 extern int entry_is_hot(struct policy_operation *pop, struct cache_entry *ce);
 extern u32 count_flag(struct policy_operation *pop, u8 flag);
-extern void set_idirty_list(struct policy_operation *pop, struct cache_entry *ce, u8 dflags);
-extern void clear_idirty_list(struct policy_operation *pop);
+extern void add_replace_list(struct policy_operation *pop, struct cache_entry *ce, u8 dflags);
+extern void del_replace_list(struct policy_operation *pop);
 extern void wait_for_cleaned(struct policy_operation *pop, struct cache_entry *ce);
 extern u8 restore_dflag(struct policy_operation *pop, struct cache_entry *ce);
 extern void run_around_segment(struct policy_operation *pop);
@@ -270,6 +269,7 @@ extern void check_flags(struct policy_operation *pop);
 extern void snapshot_cache_entry_info(struct policy_operation *pop, struct cache_entry *ce, u8 *dflags_snapshot, u8 *vflags_snapshot, u8 *hot_snapshot);
 extern struct metablock *get_unsync_entry(struct policy_operation *pop, struct cache_entry *ce);
 extern struct segment_header *set_current_flush_seg(struct policy_operation *pop, struct cache_entry *ce);
+
 /*----------------------------------------------------------------*/
 
 #endif	/* DM_CACHE_POLICY_H */

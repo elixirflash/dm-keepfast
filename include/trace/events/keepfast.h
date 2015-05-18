@@ -43,8 +43,27 @@ TRACE_EVENT(keepfast_op,
                               (u32)__entry->op == 4 ? "Write-miss" : \
                               (u32)__entry->op == 5 ? "Write-replace" : \
                               (u32)__entry->op == 6 ? "Flush" : \
-                              (u32)__entry->op == 5 ? "I" : \
-                              (u32)__entry->op == 6 ? "B" : "X"
+                              (u32)__entry->op == 7 ? "Recovery" : "X"
+                      )
+);
+
+TRACE_EVENT(keepfast_worker,
+            TP_PROTO(u32 block, u32 op),
+            TP_ARGS(block, op),
+
+            TP_STRUCT__entry(
+                    __field(u32,	        block	)
+                    __field(u32,	        op	)                    
+                             ),
+
+            TP_fast_assign(
+                    __entry->block		= block;
+                    __entry->op		        = op;                    
+                           ),
+
+            TP_printk("%s(%d)",
+                      __entry->op == 0 ? "Read-originblock" : "Write cacheblock",
+                      (u32)__entry->block                      
                       )
 );
 #if 0

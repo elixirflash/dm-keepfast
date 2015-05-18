@@ -15,7 +15,6 @@ struct segment_header *get_segment_header_by_mb(struct wb_cache *cache,
                                                 struct metablock *mb);
 sector_t calc_mb_start_sector(struct wb_cache *,
 			      struct segment_header *, u32 mb_idx);
-bool is_on_curseg(struct wb_cache *, u32 mb_idx);
 
 /*----------------------------------------------------------------*/
 
@@ -26,7 +25,7 @@ int __must_check format_cache_device(struct dm_dev *, struct wb_cache *);
 /*----------------------------------------------------------------*/
 
 void meta_prepare_for_write(struct wb_cache *cache, struct segment_header *seg, struct segment_header_device *dest);
-
+void seg_header_prepare_for_write(struct wb_cache *cache, struct segment_header *seg, struct segment_header_device *dest);
 /*----------------------------------------------------------------*/
 
 int alloc_flush_buffer(struct wb_cache *cache, size_t nr_batch);

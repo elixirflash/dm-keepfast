@@ -4,7 +4,6 @@
 #include "dm-keepfast-policy.h"
 #include "dm-keepfast-policy-internal.h"
 
-bool policy_overwrite;
 bool policy_bytealign;
 
 struct policy {
@@ -19,13 +18,8 @@ struct policy {
 
 	struct list_head hot_queue;
 	struct list_head invalid_queue;
-        struct list_head idirty_queue;
+        struct list_head replace_queue;
 
-	/*
-	 * We know exactly how many cblocks will be needed,
-	 * so we can allocate them up front.
-	 */
-	dm_cblock_t cache_size, nr_cblocks_allocated;
         u32 nr_blocks, nr_blocks_inseg, nr_pages_inblock;
         u32 nr_sectors_per_centry;
         u32 nr_sectors_per_sentry_shift;
@@ -35,16 +29,7 @@ struct policy {
         u32 hot_threshold;
         u32 hot_blocks;
 
-	/*
-	 * Chained hashtable
-	 *
-	 * Keepfast uses chained hashtable
-	 * to cache lookup.
-	 * Cache discarding often happedns
-	 * This structure fits our needs.
-	 */
 	struct bigarray *htable;
-	struct ht_head *null_head;
 };
 
 static struct policy *to_policy(struct policy_operation *p)
@@ -66,38 +51,14 @@ u32 count_flag(struct policy_operation *pop, u8 flag)
 
         return cnt;
 }
-#if 1
-void snapshot_cache_entry_info(struct policy_operation *pop, struct cache_entry *ce, u8 *dflags_snapshot, u8 *vflags_snapshot, u8 *hot_snapshot)
-{
-        struct policy *p = to_policy(pop);
-        struct segment_header *seg = ce->seg;
-        struct wb_cache *cache = p->cache;        
-        struct metablock *mb;
-	unsigned long flags;        
-        int i;
 
-        spin_lock_irqsave(&p->lock, flags);
-	for (i = 0; i < cache->nr_blocks_inseg; i++) {
-		mb = seg->mb_array + i;
-                dflags_snapshot[i] = mb->oblock_packed_d & FLAG_MASK;
-                vflags_snapshot[i] = mb->idx_packed_v & FLAG_MASK;
-                if(mb->hit_count > p->hot_limit_count)
-                        hot_snapshot[i] = 1;
-                else
-                        hot_snapshot[i] = 0;
-        }
-        spin_unlock_irqrestore(&p->lock, flags);  
-}
-#endif
-void get_entry_and_clear_dirty(struct policy_operation *pop, struct cache_entry *ce)
+int get_entry_and_clear_dirty(struct policy_operation *pop, struct cache_entry *ce)
 {
         struct policy *p = to_policy(pop);
         struct wb_cache *cache = p->cache;                
         struct cache_stats *stats = &cache->stats;
         struct metablock *mb = ce->mb;        
 	unsigned long flags;        
-        u8 dflags;
-        u8 vflags;
         u8 tag;
         int i;
         
@@ -106,9 +67,11 @@ void get_entry_and_clear_dirty(struct policy_operation *pop, struct cache_entry 
         ce->oblock = mb->oblock_packed_d >> 4;
 	ce->vflags = mb->idx_packed_v & FLAG_MASK;
         ce->idx = mb->idx_packed_v >> 4;
-        if(mb->hit_count > p->hot_limit_count)
+        if(mb->hit_count > p->hot_limit_count) {
                 ce->hot = 1;
-        else
+                spin_unlock_irqrestore(&p->lock, flags);                
+                return 0;
+        } else
                 ce->hot = 0;
         
         for(tag = 0; tag < 4; tag++) {
@@ -119,18 +82,22 @@ void get_entry_and_clear_dirty(struct policy_operation *pop, struct cache_entry 
                                         mb->oblock_packed_d &=  ~(1 << tag);
                                         atomic64_dec(&stats->dirty);
                                         atomic64_inc(&stats->flush);
+                                        BUG_ON(atomic64_read(&stats->dirty) < 0);                                        
                                         break;
+                                } else {
+                                        printk(KERN_INFO"flush thread tried to clear %d unsync entry", i);  
                                 }
-                                else
-                                        printk(KERN_INFO"flush thread tried to clear %d unsync entry", i);
+
                         }
-                           
+
                         if(!(mb->oblock_packed_d & FLAG_MASK))
                                 mb->hit_count = 0;
                 }
         }
 
         spin_unlock_irqrestore(&p->lock, flags);
+
+        return 1;
 }
 
 u32 pack_dflag(dm_block_t block, u8 dflag)
@@ -163,10 +130,14 @@ int entry_is_hot(struct policy_operation *pop, struct cache_entry *ce)
 {
         struct policy *p = to_policy(pop);
         struct metablock *mb = ce->mb;
+        unsigned long flags;
 
-        if(mb->hit_count > p->hot_limit_count)
+        spin_lock_irqsave(&p->lock, flags);        
+        if(mb->hit_count > p->hot_limit_count) {
+                spin_unlock_irqrestore(&p->lock, flags);                
                 return 1;
-
+        }
+        spin_unlock_irqrestore(&p->lock, flags);
         return 0;
 }
 
@@ -193,43 +164,59 @@ u8 restore_dflag(struct policy_operation *pop, struct cache_entry *ce)
         u8 dflags = 0;
         int tag;
 
+        spin_lock_irqsave(&p->lock, flags);        
         for(tag = 0; tag < 4; tag++) {
                 if(mb->idx_packed_v & (1 << tag))
                         dflags |= (1 << tag);
         }
+        spin_unlock_irqrestore(&p->lock, flags);        
 
         return dflags;
 }
 
-void set_idirty_list(struct policy_operation *pop, struct cache_entry *ce, u8 dflags)
-{
-        struct policy *p = to_policy(pop);
-        struct metablock *mb = ce->mb;
-	unsigned long flags;                
-
-        spin_lock_irqsave(&p->lock, flags);
-        mb->oblock_packed_d &= ~FLAG_MASK;
-        mb->oblock_packed_d |= dflags;
-        list_add_tail(&mb->hot_list, &p->idirty_queue); //sync? with flush        
-        spin_unlock_irqrestore(&p->lock, flags);
-        
-
-}
-
-void clear_idirty_list(struct policy_operation *pop)
+void add_replace_list(struct policy_operation *pop, struct cache_entry *ce, u8 dflags)
 {
         struct policy *p = to_policy(pop);
         struct wb_cache *cache = p->cache;
-        struct cache_entry ce = {0, };
+        struct segment_header *seg = ce->seg;        
+        struct metablock *mb = ce->mb;
+	unsigned long flags;
+        int idx;
+
+
+
+        spin_lock_irqsave(&p->lock, flags);
+        BUG_ON(mb->hit_count > p->hot_limit_count);
+        mb->oblock_packed_d &= ~FLAG_MASK;
+        mb->oblock_packed_d |= dflags;
+        list_add_tail(&mb->hot_list, &p->replace_queue); //sync? with flush
+        idx = mb->idx_packed_v>>4;        
+        bitmap_set(seg->replace_bitmap, do_div(idx, cache->nr_blocks_inseg), 1);        
+        spin_unlock_irqrestore(&p->lock, flags);
+
+        printk(KERN_INFO"%s - idx:%d", __FUNCTION__, idx);        
+}
+
+void del_replace_list(struct policy_operation *pop)
+{
+        struct policy *p = to_policy(pop);
+        struct wb_cache *cache = p->cache;
         struct segment_header *seg;
         struct metablock *mb;
         int tag;
 	unsigned long flags;
+        int idx;
       
-        while (!list_empty(&p->idirty_queue)) {
-                spin_lock_irqsave(&p->lock, flags);                
-                mb = list_entry(p->idirty_queue.next, struct metablock, hot_list);
-                seg = get_segment_header_by_mb(cache, mb);                                
+        while (!list_empty(&p->replace_queue)) {
+                spin_lock_irqsave(&p->lock, flags);
+                mb = list_entry(p->replace_queue.next, struct metablock, hot_list);
+                seg = get_segment_header_by_mb(cache, mb);
+                BUG_ON(mb->hit_count > p->hot_limit_count);
+                
+                idx = mb->idx_packed_v>>4;
+
+                bitmap_clear(seg->replace_bitmap, do_div(idx, cache->nr_blocks_inseg), 1);
+                printk(KERN_INFO"clear replace bit of centry(idx:%d, oblock(%d)",idx, mb->oblock_packed_d>>4);
                 list_del_init(&mb->hot_list);
 
                 //                ce.mb = mb;
@@ -239,12 +226,12 @@ void clear_idirty_list(struct policy_operation *pop)
                         if(!(mb->idx_packed_v & (1 << tag)) &&
                            mb->oblock_packed_d & (1 << tag)) {
                                 mb->oblock_packed_d &=  ~(1 << tag);
+
                         }
                 }
                 spin_unlock_irqrestore(&p->lock, flags);                                                
-                printk(KERN_INFO"%s - clear entry of idx:%d, oblock:%d, vflags:%d, dflags:%d", __FUNCTION__,  mb->idx_packed_v>>4, mb->oblock_packed_d >>4, mb->oblock_packed_d &FLAG_MASK, mb->oblock_packed_d&FLAG_MASK);
-                printk(KERN_INFO"mb oblock:%d", mb->oblock_packed_d >>4 );                                               
                 wake_up_interruptible(&seg->flush_wait_queue);
+                flush_seg_header(cache, seg, 1);
         }
 }
                       
@@ -255,16 +242,8 @@ void wait_for_cleaned(struct policy_operation *pop, struct cache_entry *ce)
         struct segment_header *seg = ce->seg;
         u8 tag = se->tag;
 
-        printk(KERN_INFO"dirty:%d", (mb->oblock_packed_d & (1 << se->tag)));
-#if 0
-        while(1) {
-                printk(KERN_INFO"%d", (mb->oblock_packed_d & (1 << se->tag)));
-        }
-#endif        
         wait_event_interruptible(seg->flush_wait_queue,
                                  (mb->oblock_packed_d & (1 << tag)) == 0);
-
-        printk(KERN_INFO"%d", mb->oblock_packed_d & FLAG_MASK);
 }
 
 int try_lru_put_hot(struct policy_operation *pop, struct cache_entry *ce)
@@ -275,7 +254,8 @@ int try_lru_put_hot(struct policy_operation *pop, struct cache_entry *ce)
         struct metablock *mb = ce->mb;
         struct metablock *mb_hot;
         int need_balance = 0;
-	unsigned long flags;        
+	unsigned long flags;
+        int i;
 
         if(mb->hit_count <= p->hot_limit_count)
                 return 0;
@@ -287,8 +267,13 @@ int try_lru_put_hot(struct policy_operation *pop, struct cache_entry *ce)
         //        printk(KERN_INFO"%s - bypass hot:%d, cnt:%d", __FUNCTION__, mb->idx_packed_v >> 4, mb->hit_count);
 
         spin_lock_irqsave(&p->lock, flags);
-        if(!list_empty(&mb->hot_list)) 
-                list_del(&mb->hot_list);
+        if(!list_empty(&mb->hot_list))  {
+                for(i = 0; i < 4; i++) 
+                        BUG_ON((ce->mb->oblock_packed_d &(1<<i)) &&
+                               !(ce->mb->idx_packed_v & (1<<i)));
+                                
+                list_del_init(&mb->hot_list);
+        }
         else {
                 if(need_balance) {
                         mb_hot = list_entry(p->hot_queue.next, struct metablock, hot_list);
@@ -346,26 +331,26 @@ struct metablock *ht_lookup(struct policy *p, dm_oblock_t oblock)
 
 void ht_del(struct policy *p, struct metablock *mb)
 {
-	struct ht_head *null_head;
-
-	hlist_del(&mb->ht_list);
-
-	null_head = p->null_head;
-	hlist_add_head(&mb->ht_list, &null_head->ht_list);
+	hlist_del_init(&mb->ht_list);
 }
 
-void ht_register(struct policy *p, dm_oblock_t oblock,
+int ht_register(struct policy *p, dm_oblock_t oblock,
                  struct metablock *mb)
 {
 	struct ht_head *head;
         u8 dflags = mb->oblock_packed_d & FLAG_MASK; /* for recovery */
         
         head = ht_get_head(p, oblock);
+
+        if (!hlist_unhashed(&mb->ht_list))
+                return -1;
         
-	hlist_del(&mb->ht_list);
+        hlist_del_init(&mb->ht_list);
 	hlist_add_head(&mb->ht_list, &head->ht_list);
 
         mb->oblock_packed_d = pack_dflag(oblock, dflags);
+
+        return 0;
 };
 
 static void free_ht(struct bigarray *htable)
@@ -378,7 +363,6 @@ static void free_ht(struct bigarray *htable)
  */
 static int __must_check ht_init(struct wb_cache *cache, struct policy *p)
 {
-	u32 idx;
 	size_t i, nr_heads;
 	struct bigarray *arr;
 
@@ -401,23 +385,12 @@ static int __must_check ht_init(struct wb_cache *cache, struct policy *p)
 		INIT_HLIST_HEAD(&hd->ht_list);
 	}
 
-	/*
-	 * Our hashtable has one special bucket called null head.
-	 * Orphan metablocks are linked to the null head.
-	 */
-	p->null_head = bigarray_at(p->htable, p->nr_blocks);
-
-	for (idx = 0; idx < p->nr_blocks; idx++) {
-		struct metablock *mb = mb_at(cache, idx);
-		hlist_add_head(&mb->ht_list, &p->null_head->ht_list);
-	}
-
 	return 0;
 }
 
 //------------------------------------------------------------------------
 
-static inline u8 entry_get_tag(struct policy *p, dm_oblock_t oblock)
+inline u8 entry_get_tag(struct policy *p, dm_oblock_t oblock)
 {
         return (oblock & (p->nr_sectors_per_centry - 1)) >> 3;
 }
@@ -426,13 +399,12 @@ int wb_lookup(struct policy_operation *pop, dm_oblock_t oblock,
                             struct cache_entry *ce)
 {
         struct policy *p = to_policy(pop);
-        struct wb_cache *cache = p->cache;
-        struct cache_stats *stats = &cache->stats;
+        struct wb_cache *cache = p->cache;        
         struct sub_entry *se = &ce->se;
-        struct metablock *mb;
         struct segment_header *seg;
-        dm_oblock_t oblock_unpacked;
+        struct metablock *mb;
 	unsigned long flags;
+        u32 idx;
         u32 key;
         u8 tag;
 
@@ -449,7 +421,19 @@ int wb_lookup(struct policy_operation *pop, dm_oblock_t oblock,
         se->oblock = oblock & ~((1 << p->nr_sectors_per_sentry_shift) -1);
 
         if (mb) {
+                seg = get_segment_header_by_mb(cache, mb);
+
+                ce->seg = seg;
                 ce->mb = mb;
+
+                spin_lock_irqsave(&p->lock, flags);                                
+                ce->dflags = mb->oblock_packed_d & FLAG_MASK;
+                unpack_vflag(mb->idx_packed_v, &ce->idx, &ce->vflags);                
+                spin_unlock_irqrestore(&p->lock, flags);
+
+                ce->cblock = calc_mb_start_sector(cache, seg, ce->idx);
+                se->cblock = ce->cblock + (tag << p->nr_sectors_per_sentry_shift);                
+                
                 return POLICY_HIT;                
         }
 
@@ -457,11 +441,10 @@ int wb_lookup(struct policy_operation *pop, dm_oblock_t oblock,
 }
 
 int wb_map(struct policy_operation *pop, dm_oblock_t oblock,
-                            struct cache_entry *ce)
+           struct cache_entry *ce)
 {
         struct policy *p = to_policy(pop);
         struct wb_cache *cache = p->cache;
-        struct cache_stats *stats = &cache->stats;
         struct sub_entry *se = &ce->se;
         struct metablock *mb;
         struct segment_header *seg;
@@ -515,19 +498,22 @@ int wb_map(struct policy_operation *pop, dm_oblock_t oblock,
                 if(mb->hit_count > p->hot_limit_count) 
                         ce->hot = 1;
 
-                if(atomic_read(&cache->current_flush_seg_id) == seg->global_id  && !entry_is_hot(pop, ce) &&
+                if(atomic_read(&cache->current_flush_seg_id) == seg->global_id  && !(mb->hit_count > p->hot_limit_count) &&
                    cache->current_seg->global_id != seg->global_id) {
-                        p->unsync_entry[p->unsync_idx] = NULL;                    
+                        p->unsync_entry[p->unsync_idx] = NULL;             
                         spin_unlock_irqrestore(&p->lock, flags);
                         
                         return POLICY_REPLACE;
                 }
+
                 p->unsync_idx ^= 1;
                 p->unsync_entry[p->unsync_idx] = mb;                                        
                 spin_unlock_irqrestore(&p->lock, flags);                        
 
-
                 //                printk(KERN_INFO"%s - segid:%d, oblock:%d, seoblock:%d, tag:%d, dflag:%d, start_sec:%d", __FUNCTION__, seg->global_id, oblock, se->oblock, tag, ce->dflags, seg->start_sector);
+#ifdef UNITTEST
+                return POLICY_REPLACE;
+#endif                        
                 return POLICY_HIT;
 	}
 
@@ -544,16 +530,17 @@ static void wb_set_flag(struct policy_operation *pop, struct cache_entry *ce)
         struct wb_cache *cache = p->cache;
         struct cache_stats *stats = &cache->stats;
 	unsigned long flags;
-        u32 tag = se->tag;        
+        u32 tag = se->tag;
+
 
         spin_lock_irqsave(&p->lock, flags);
         if(!(mb->oblock_packed_d & (1 << tag))) {
                 mb->oblock_packed_d |= (1 << tag);
-                atomic64_inc(&stats->dirty);                
+                atomic64_inc(&stats->dirty);
         }
         if(!(mb->idx_packed_v & (1 << tag))) {
                 mb->idx_packed_v |= (1 << tag);
-                atomic64_inc(&stats->valid);                        
+                atomic64_inc(&stats->valid);
         }
         BUG_ON(!(mb->idx_packed_v & (1 << tag)) &&
                mb->oblock_packed_d & (1 << tag));
@@ -575,8 +562,8 @@ static void wb_set_dirty(struct policy_operation *pop, struct cache_entry *ce)
 
         spin_lock_irqsave(&p->lock, flags);
         mb->oblock_packed_d |= (1 << tag);
+        atomic64_inc(&stats->dirty);                                
         spin_unlock_irqrestore(&p->lock, flags);
-        atomic64_inc(&stats->dirty);                        
 
         /*
         kfdebug("W - [ce idx:%d, oblock:%d, cblock:%d, flags(d:%d,v:%d), hot:%d] [se oblock:%d,cblock:%d, tag:%d hitcnt:%d]",
@@ -593,17 +580,12 @@ static void wb_clear_dirty(struct policy_operation *pop, struct cache_entry *ce)
 	unsigned long flags;
         struct wb_cache *cache = p->cache;
         struct cache_stats *stats = &cache->stats;
-        int i;
 
         BUG_ON(tag > 3);        
 
         spin_lock_irqsave(&p->lock, flags);
-        for(i = 0; i < p->unsync_cnt; i++) {
-                if(p->unsync_entry[i] != mb) 
-                        mb->oblock_packed_d &=  ~(1 << tag);
-                else
-                        printk(KERN_INFO"flush thread tried to clear %d unsync entry(oblock:%d)", i, mb->oblock_packed_d>>4);
-        }
+        mb->oblock_packed_d &=  ~(1 << tag);
+
         if(!(mb->oblock_packed_d & FLAG_MASK))
                 mb->hit_count = 0;
         spin_unlock_irqrestore(&p->lock, flags);
@@ -643,8 +625,9 @@ static void wb_clear_valid(struct policy_operation *pop, struct cache_entry *ce)
 
         spin_lock_irqsave(&p->lock, flags);
         mb->idx_packed_v &= ~(1 << tag);
+        atomic64_dec(&stats->valid);                        
         spin_unlock_irqrestore(&p->lock, flags);
-        atomic64_dec(&stats->valid);                
+
 }
 
 //resume
@@ -687,20 +670,20 @@ static void get_next_segment(struct policy_operation *pop, struct policy *p, str
 	 * we must wait until the segment is all clean.
 	 * A clean segment doesn't have
 	 * log to flush and dirties to migrate.
-	 */        
+	 */
 	wait_for_flush(cache, next_id);
 
 	while (atomic_read(&current_seg->nr_inflight_ios)) {
 		n1++;
 		if (n1 == 150){
 			KFWARN("inflight ios remained for current seg");
+                        printk(KERN_INFO"infligt ios:%d", atomic_read(&current_seg->nr_inflight_ios));
+                        n1 = 150;
                 }
 		schedule_timeout_interruptible(msecs_to_jiffies(1));
 	}
 
 	INIT_COMPLETION(current_seg->flush_done);
-        //	INIT_COMPLETION(current_seg->flush_done);
-        //could need to be done of mb's flush !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 	next_seg = get_segment_header_by_id(cache, next_id);
 	next_seg->global_id = next_id;
@@ -714,8 +697,6 @@ static void get_next_segment(struct policy_operation *pop, struct policy *p, str
                                next_seg->global_id, atomic_read(&next_seg->nr_inflight_ios));
 		schedule_timeout_interruptible(msecs_to_jiffies(1));
 	}
-
-        //        check_dirty_inseg(pop, next_seg);
 
         remove_mappings_inseg(pop, next_seg);
 
@@ -765,15 +746,12 @@ void check_flags(struct policy_operation *pop)
                         }
                 }
         }
-
-        printk(KERN_INFO"dirties:%d valides:%d\n", dirties, valides);
 }
               
 void alloc_cache_entry(struct policy_operation *pop, struct cache_entry *ce)
 {
         struct policy *p = to_policy(pop);
         struct wb_cache *cache = p->cache;
-        struct sub_entry *se = &ce->se;
         struct segment_header *wseg;
         struct metablock *mb = NULL;
         u32 idx_inseg;
@@ -785,20 +763,22 @@ void alloc_cache_entry(struct policy_operation *pop, struct cache_entry *ce)
         unsigned long flags;
         u32 clean_idx;
         u32 clean_offset = 0;
-        
+        u32 hot = 1;
+
         wseg = cache->current_seg;
         wcursor = cache->cursor;
         idx_inseg = do_div(wcursor, p->nr_blocks_inseg);
 
         /* find a clean cache entry and bypass dirty cache entries */
-        while(dflags) {
+        while(dflags || hot) {
                 for(clean_idx = idx_inseg; clean_idx < p->nr_blocks_inseg; clean_idx++) {
-                        //                        spin_lock_irqsave(&p->lock, flags);   
+                        spin_lock_irqsave(&p->lock, flags);   
                         mb = wseg->mb_array + clean_idx;
                         unpack_dflag(mb->oblock_packed_d, &oblock, &dflags);
                         unpack_vflag(mb->idx_packed_v, &idx, &vflags);
-                        //                        spin_unlock_irqrestore(&p->lock, flags);        
-                        if(!dflags)
+                        hot = mb->hit_count > p->hot_limit_count;
+                        spin_unlock_irqrestore(&p->lock, flags);
+                        if(!dflags && !hot)
                                 break;
 
                         if(mb->hit_count > p->hot_limit_count)
@@ -807,14 +787,15 @@ void alloc_cache_entry(struct policy_operation *pop, struct cache_entry *ce)
                 }
 
                 /* it is last clean entry or there is no clean entry in seg */
+
                 if(clean_idx == p->nr_blocks_inseg - 1 ||
-                   clean_idx == p->nr_blocks_inseg) {    
+                   clean_idx == p->nr_blocks_inseg) {
+                        wseg = cache->current_seg;                        
                         get_next_segment(pop, p, cache); /* get next segment previously */
 
                         if(clean_idx == p->nr_blocks_inseg) {
-                                BUG_ON(!dflags);
+                                wseg = cache->current_seg;                                                        
                                 idx_inseg = 0;
-                                wseg = cache->current_seg;
                         }
                 }
         }
@@ -835,7 +816,7 @@ void alloc_cache_entry(struct policy_operation *pop, struct cache_entry *ce)
                cpu_to_le32(wseg->global_id), (unsigned int )mb, idx_inseg, (u32)ce->cblock, mb->idx_packed_v >> 4, cache->cursor);
 }
 
-void wb_insert_mapping(struct policy_operation *pop, dm_oblock_t oblock, struct cache_entry *ce)
+int wb_insert_mapping(struct policy_operation *pop, dm_oblock_t oblock, struct cache_entry *ce)
 {
         struct metablock *mb;
         struct policy *p = to_policy(pop);
@@ -843,22 +824,29 @@ void wb_insert_mapping(struct policy_operation *pop, dm_oblock_t oblock, struct 
         unsigned long flags;        
         u32 key;
         u8 tag;
+        int ret;
 
-        tag = entry_get_tag(p, oblock);        
+        tag = entry_get_tag(p, oblock);
 
-        spin_lock_irqsave(&p->lock, flags);        
+        spin_lock_irqsave(&p->lock, flags);
         key = ht_get_key(p, oblock);
         mb = ce->mb;
-        ht_register(p, key, mb);
+        
+        if(ht_register(p, key, mb) < 0) {
+                spin_unlock_irqrestore(&p->lock, flags);
+                
+                return -1;
+        }
+
         se->vflag = mb->idx_packed_v & (1 << tag);
         se->dflag = mb->oblock_packed_d & (1 << tag);
-        spin_unlock_irqrestore(&p->lock, flags);        
+        spin_unlock_irqrestore(&p->lock, flags);
 
         se->cblock = ce->cblock + (tag << p->nr_sectors_per_sentry_shift);
         se->oblock = oblock;
         se->tag = tag;
 
-        
+        return 0;
 }
 
 void remove_mappings_inseg(struct policy_operation *pop, struct segment_header *seg)
@@ -867,10 +855,7 @@ void remove_mappings_inseg(struct policy_operation *pop, struct segment_header *
         struct wb_cache *cache = p->cache;
         struct cache_stats *stats = &cache->stats;
         unsigned long flags;
-        u8 dflags, vflags;
-        dm_oblock_t oblock;
         u32 valid_count;
-        u32 idx;
 	u32 i;
         u8 tag;
 
@@ -878,7 +863,6 @@ void remove_mappings_inseg(struct policy_operation *pop, struct segment_header *
         
 	for (i = 0; i < p->nr_blocks_inseg; i++) {
 		struct metablock *mb = seg->mb_array + i;
-
 
 #if 1
                 /* find out sub entries of invalid and dirty */
@@ -892,21 +876,22 @@ void remove_mappings_inseg(struct policy_operation *pop, struct segment_header *
                         }
                 }
 
-                //                atomic64_dec(&stats->dirty);                
+                //                atomic64_dec(&stats->dirty);
 #endif
                 /* remove mapping & clear flags only clean entries
                    bypassing cache entries of dirty */
                 
-                if(!(mb->oblock_packed_d & FLAG_MASK)) {
+                if(!(mb->oblock_packed_d & FLAG_MASK) && /* Clean */
+                   !(mb->hit_count > p->hot_limit_count)) { /* cold */
                         valid_count = count_flag(pop, mb->idx_packed_v & FLAG_MASK);
                         ht_del(p, mb);
-                        mb->hit_count = 0;                        
+                        mb->hit_count = 0;
                         mb->idx_packed_v &= ~FLAG_MASK;
 
                         atomic64_sub(valid_count, &stats->valid);
                 }
 	}
-        spin_unlock_irqrestore(&p->lock, flags);        
+        spin_unlock_irqrestore(&p->lock, flags);
 }
 
 void destroy_cache_policy(struct wb_cache *cache)
@@ -960,7 +945,7 @@ int create_cache_policy(struct wb_cache *cache, char *name)
         p = to_policy(cache->pop);
 
         INIT_LIST_HEAD(&p->hot_queue);
-        INIT_LIST_HEAD(&p->idirty_queue);        
+        INIT_LIST_HEAD(&p->replace_queue);        
 
         p->nr_sectors_per_centry = 1 << cache->nr_sectors_per_block_shift;
         p->nr_sectors_per_centry_shift = cache->nr_sectors_per_block_shift;
@@ -968,7 +953,7 @@ int create_cache_policy(struct wb_cache *cache, char *name)
         p->nr_pages_inblock = cache->nr_pages_inblock;
 
         p->hot_threshold = 20;
-        p->hot_limit_count = 15;
+        p->hot_limit_count = 10000;
         p->unsync_idx = 0;
         p->unsync_cnt = 2;
 

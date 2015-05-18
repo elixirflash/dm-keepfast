@@ -110,6 +110,18 @@ void *bigarray_at(struct bigarray *arr, u64 i)
 	(sizeof(struct segment_header_device) + \
 	 sizeof(struct metablock_device) * (cache)->nr_blocks_inseg)
 
+int is_last_sub_entry(struct wb_cache *cache, u32 idx)
+{
+	u32 idx_inseg;
+        
+        idx_inseg = do_div(idx, cache->nr_blocks_inseg);
+
+        if(idx_inseg + 1 == cache->nr_blocks_inseg)
+                return 1;
+
+        return 0;
+}
+
 /*
  * Get the in-core metablock of the given index.
  */
@@ -179,22 +191,6 @@ sector_t calc_page_start_sector(struct wb_cache *cache,
         return sector;
 }
 
-bool is_on_curseg(struct wb_cache *cache, u32 mb_idx)
-{
-	u32 start = cache->current_seg->start_idx;
-	if (mb_idx < start)
-		return false;
-
-	if (mb_idx >= (start + cache->nr_blocks_inseg))
-		return false;
-
-	return true;
-}
-
-/*
- * Get the segment from the segment id.
- * The Index of the segment is calculated from the segment id.
- */
 struct segment_header *get_segment_header_by_id(struct wb_cache *cache,
 						u32 segment_id)
 {
@@ -236,6 +232,7 @@ static int __must_check init_segment_header_array(struct wb_cache *cache)
 			calc_segment_header_start(cache, segment_idx);
 
                 seg->global_id = segment_idx;
+                bitmap_zero(seg->replace_bitmap, MAX_BLOCKS_IN_SEG);
 
 		atomic_set(&seg->nr_inflight_ios, 0);
                 atomic_set(&seg->flush_io_count, 0);                
@@ -292,18 +289,14 @@ read_superblock(struct wb_cache *cache, struct superblock_device *sb_dev, struct
 	}
 
 	memcpy(sb_dev, buf, sizeof(*sb_dev));
+
+        printk(KERN_INFO"sbdevmagic:%x", sb_dev->magic);
 bad_io:
 	kfree(buf);
 
 	return r;
 }
 
-/*
- * Check if the cache device is already formatted.
- * Returns 0 iff this routine runs without failure.
- * cache_valid is stored true iff the cache device
- * is formatted and needs not to be re-fomatted.
- */
 int __must_check audit_cache_device(struct dm_dev *dev, struct wb_cache *cache,
 				    bool *need_format, bool *allow_format)
 {
@@ -318,9 +311,6 @@ int __must_check audit_cache_device(struct dm_dev *dev, struct wb_cache *cache,
 
 	*need_format = true;
 	*allow_format = false;
-
-        atomic_set(&cache->last_flushed_segment_id,
-                   le32_to_cpu(sb_dev.last_flushed_segment_id));
 
 	if (le32_to_cpu(sb_dev.magic) != KEEPFAST_MAGIC) {
 		KFERR("superblock header: magic number invalid");
@@ -351,7 +341,6 @@ static int format_superblock_header(struct dm_dev *dev, struct wb_cache *cache)
 	struct superblock_device sb_dev = {
 		.magic = cpu_to_le32(KEEPFAST_MAGIC),
 		.segment_size_order = cache->segment_size_order,
-                .last_flushed_segment_id = 0,
 	};
 
 	void *buf = kzalloc(1 << SECTOR_SHIFT, GFP_KERNEL);
@@ -432,15 +421,6 @@ int __must_check format_cache_device(struct dm_dev *dev, struct wb_cache *cache)
 
 	format_superblock_header(dev, cache);
 
-	/* Format the metadata regions */
-
-	/*
-	 * Count the number of segments
-	 */
-
-        //	atomic64_set(&context.count, nr_segments);
-        //	context.err = 0;
-
 	buf = kzalloc(1 << 12, GFP_KERNEL);
 	if (!buf) {
 		KFERR();
@@ -449,17 +429,14 @@ int __must_check format_cache_device(struct dm_dev *dev, struct wb_cache *cache)
 
         printk(KERN_INFO"formatting cache device of %d segments", nr_segments);
 
-	/*
-	 * Submit all the writes asynchronously.
-	 */
+        /*
+         * Format the metadata regions 
+         */
 	for (i = 0; i < nr_segments; i++) {
 		struct dm_io_request io_req_seg = {
 			.client = wb_io_client,
 			.bi_rw = WRITE_FUA,
                         .notify.fn = NULL,
-                        //there is a bug that could not write at last area
-                        //                        .notify.fn = format_segmd_endio,
-                        //                        .notify.context = &context,
 			.mem.type = DM_IO_KMEM,
 			.mem.ptr.addr = buf,
 		};
@@ -476,8 +453,6 @@ int __must_check format_cache_device(struct dm_dev *dev, struct wb_cache *cache)
 		}
 	}
 	kfree(buf);
-
-        //        kfdebug("nrsegs:%d, i:%d,remained segs:%lld",nr_segments, i,  atomic64_read(&context.count));
 
 	if (r) {
 		KFERR();
@@ -551,10 +526,12 @@ void meta_prepare_for_write(struct wb_cache *cache, struct segment_header *seg, 
         struct metablock_device *mbdev = NULL;
         struct metablock *mb;
         u32 mb_idx_inseg; 
-        u32 idx;
 	u32 i;
 
 	dest->global_id = cpu_to_le32(seg->global_id);
+        for(i = 0; i < BITS_TO_LONGS(MAX_BLOCKS_IN_SEG); i++)
+                dest->replace_bitmap[i] = cpu_to_le32(seg->replace_bitmap[i]);
+
 #if 0
         if(policy_bytealign) {
                 idx = centry->idx;
@@ -577,6 +554,19 @@ void meta_prepare_for_write(struct wb_cache *cache, struct segment_header *seg, 
        }
 }
 
+void seg_header_prepare_for_write(struct wb_cache *cache, struct segment_header *seg, struct segment_header_device *dest)
+{
+        struct metablock_device *mbdev = NULL;
+        struct metablock *mb;
+        u32 mb_idx_inseg; 
+	u32 i;
+
+	dest->global_id = cpu_to_le32(seg->global_id);
+
+        for(i = 0; i < BITS_TO_LONGS(MAX_BLOCKS_IN_SEG); i++) 
+                dest->replace_bitmap[i] = cpu_to_le32(seg->replace_bitmap[i]);
+}
+
 /*
  * Read the on-disk metadata of the segment
  * and update the in-core cache metadata structure
@@ -594,13 +584,17 @@ static int update_by_segment_header_device(struct wb_cache *cache,
         struct metablock_device *mbdev;
         dm_oblock_t oblock;
         u8 dflag;                
-        struct cache_entry centry;
+        struct cache_entry centry = {0, };
+        struct cache_entry centry_mapped = {0, };
+        enum policy_operation_result presult;
         u32 idx;
-	u32 i;        
+	u32 i, j;
         u8 vflag;
-        u32 count;
-        u32 valid_count;
-        u32 dirty_count;
+        u32 tag;
+        u8 do_mapping;
+        u32 idx_inseg;
+        int ret;
+        unsigned long *replace_bitmap;
 
         centry.seg = seg;
         se = &centry.se;
@@ -609,42 +603,74 @@ static int update_by_segment_header_device(struct wb_cache *cache,
 	INIT_COMPLETION(seg->flush_done);
         
 	for (i = 0 ; i < cache->nr_blocks_inseg; i++) {
+                do_mapping = 0;                
 		mb = seg->mb_array + i;
 		mbdev = &src->mbarr[i];
                 centry.mb = mb;
+                centry.seg = seg;
+                
+                unpack_vflag(le32_to_cpu(mbdev->idx_packed_v), &idx, &vflag);
+                if(!vflag) 
+                        continue;
 
                 mb->oblock_packed_d = le32_to_cpu(mbdev->oblock_packed_d);
+                unpack_dflag(mb->oblock_packed_d, &oblock, &dflag); /* for debugging */
                 mb->hit_count = le32_to_cpu(mbdev->hit_count);
-                unpack_vflag(le32_to_cpu(mbdev->idx_packed_v), &idx, &vflag);
-
                 pack_vflag(&mb->idx_packed_v, vflag);
 
-                valid_count = count_flag(pop, vflag);
-                atomic64_add(valid_count, &stats->valid);
-                
-                unpack_dflag(mb->oblock_packed_d, &oblock, &dflag); /* for debugging */
-
-                dirty_count = count_flag(pop, dflag);
-                atomic64_add(dirty_count, &stats->dirty);
-                
-                if(!vflag) {
-                        kfdebug("%s - segid:%d, mbidx:%d, hticount:%d dflags:%d, vflag:%d seg:%d",
-                               __FUNCTION__, src->global_id, idx, mb->hit_count, dflag, vflag, seg->global_id);
-                        continue;
+                for(j = 0; j < BITS_TO_LONGS(MAX_BLOCKS_IN_SEG); j++)  {
+                        seg->replace_bitmap[j] = le32_to_cpu(src->replace_bitmap[j]);
+                        if(seg->replace_bitmap[j])
+                                printk(KERN_INFO"bitmap:%x", (unsigned int)seg->replace_bitmap[j]);
                 }
-
-                policy_insert_mapping(pop, oblock, &centry);
-
-                if(entry_is_hot(pop, &centry)) 
-                        try_lru_put_hot(pop, &centry);
-
-                kfdebug("%s -INSERT MAP  segid:%d, mbidx:%d, hticount:%d dflags:%d, vflag:%d seg:%d",
-                        __FUNCTION__, src->global_id, idx, mb->hit_count, dflag, vflag, seg->global_id);
-
-                //        trace_keepfast_recovery(src, mbdev, i);
-                //TODO: do increment dirty count
+                
+                for(tag = 0; tag < 4; tag++) {
+                        if(dflag & (1 << tag) && vflag & (1 << tag)) {
+                                se->tag = tag;
+                                policy_set_valid(pop, &centry);
+                                policy_set_dirty(pop, &centry);
+                                atomic64_inc(&stats->dirty);
+                                atomic64_inc(&stats->valid);
+                                trace_keepfast_op(&centry, 7);
+                                do_mapping = 1;
+                        }
+                }
+                
+                if(do_mapping) {
+#if 1                        
+                        presult = policy_lookup(pop, oblock, &centry_mapped);
+                        if(presult != POLICY_HIT) {
+                                ret = policy_insert_mapping(pop, oblock, &centry);
+                        } else {
+                                centry.idx = mb->idx_packed_v >> 4;
+                                idx_inseg = do_div(centry.idx, cache->nr_blocks_inseg);
+                                replace_bitmap = centry_mapped.seg->replace_bitmap;
+                                
+                                 /* do flush dirty cache entry */
+                                if(!test_and_clear_bit(idx_inseg, replace_bitmap)) { // mapped entry is old entry
+                                        printk(KERN_INFO"%s - mapped entry(%d) is old entry let's change old to new entry(%d)\n", __FUNCTION__, centry_mapped.idx, centry.idx);
+                                        clear_bit(idx_inseg, centry.seg->replace_bitmap); 
+                                        policy_remove_mapping(pop, &centry_mapped);
+                                        flush_cache_entry(cache, pop, &centry_mapped);
+                                        policy_insert_mapping(pop, oblock, &centry);
+                                } else  { // mapped entry is new entry
+                                        printk(KERN_INFO"%s - mapped entry(%d) is new entry, flush old entry(%d)\n", __FUNCTION__, centry_mapped.idx, centry.idx);
+                                        flush_cache_entry(cache, pop, &centry);
+                                        
+                                        return 0;
+                                }
+                        }
+#else
+                        policy_insert_mapping(pop, oblock, &centry);
+#endif
+                        
+                        if(entry_is_hot(pop, &centry)) 
+                                try_lru_put_hot(pop, &centry);
+                        kfdebug("%s -INSERT MAP  segid:%d, mbidx:%d, hticount:%d dflags:%d, vflag:%d seg:%d",
+                                __FUNCTION__, src->global_id, idx, mb->hit_count, dflag, vflag, seg->global_id);
+                }
         }
-
+        
         return 0;
 }
 
@@ -671,7 +697,6 @@ static int __must_check recover_cache(struct wb_cache *cache)
 	struct superblock_device uninitialized_var(sb_dev);        
 	u32 i, nr_segments = cache->nr_segments;
 	int r = 0;
-        u32 lowest_clean_seg;
 
 	header = kmalloc(sizeof_segment_header_device(cache), GFP_KERNEL);
 	if (!header) {
@@ -685,7 +710,6 @@ static int __must_check recover_cache(struct wb_cache *cache)
 
 	max_id = SZ_MAX;
 	init_segment_id = 0;
-        lowest_clean_seg = SZ_MAX;        
 
         for (i = 0; i < nr_segments; i++) {
 		r = read_segment_header_device(header, cache, i);
@@ -702,10 +726,7 @@ static int __must_check recover_cache(struct wb_cache *cache)
 
 	kfree(header);
 
-	seg = get_segment_header_by_id(cache, lowest_clean_seg);
-
         init_segment_id = 0;
-
 	seg = get_segment_header_by_id(cache, init_segment_id);
 
 	seg->global_id = init_segment_id;
@@ -736,9 +757,6 @@ static int __must_check recover_cache(struct wb_cache *cache)
 int alloc_flush_buffer(struct wb_cache *cache, size_t nr_batch)
 {
 	void *buf;
-        void *dflags_snapshot;
-        void *vflags_snapshot;
-        void *hot_snapshot;        
 
 	buf = vmalloc(nr_batch * ((cache->nr_blocks_inseg * cache->nr_pages_inblock) << 12));
 	if (!buf) {
@@ -746,37 +764,10 @@ int alloc_flush_buffer(struct wb_cache *cache, size_t nr_batch)
 		return -ENOMEM;
 	}
 
-	dflags_snapshot = kmalloc(cache->nr_blocks_inseg, GFP_KERNEL);
-	if (!dflags_snapshot) {
-		vfree(buf);
-		KFERR("couldn't allocate dirty snapshot");
-		return -ENOMEM;
-	}
-
-	vflags_snapshot = kmalloc(cache->nr_blocks_inseg, GFP_KERNEL);
-	if (!vflags_snapshot) {
-		vfree(buf);
-		KFERR("couldn't allocate dirty snapshot");
-		return -ENOMEM;
-	}
-
-	hot_snapshot = kmalloc(cache->nr_blocks_inseg, GFP_KERNEL);
-	if (!hot_snapshot) {
-		vfree(buf);
-		KFERR("couldn't allocate dirty snapshot");
-		return -ENOMEM;
-	}                
-
 	if (cache->flush_buffer)
 		vfree(cache->flush_buffer);
 
-	kfree(cache->dflags_snapshot); /* kfree(NULL) is safe */
-	kfree(cache->vflags_snapshot); /* kfree(NULL) is safe */        
-
 	cache->flush_buffer = buf;
-	cache->dflags_snapshot = dflags_snapshot;
-	cache->vflags_snapshot = vflags_snapshot;
-	cache->hot_snapshot = hot_snapshot;                
 	cache->nr_cur_batched_flush = nr_batch;
 
 	return 0;
@@ -785,9 +776,6 @@ int alloc_flush_buffer(struct wb_cache *cache, size_t nr_batch)
 void free_flush_buffer(struct wb_cache *cache)
 {
 	vfree(cache->flush_buffer);
-	kfree(cache->dflags_snapshot);
-	kfree(cache->vflags_snapshot);
-	kfree(cache->hot_snapshot);                
 }
 
 /*----------------------------------------------------------------*/
@@ -928,13 +916,8 @@ bad_buf_1_pool:
 
 void free_cache(struct wb_cache *cache)
 {
-	/*
-	 * Must clean up all the volatile data
-	 * before termination.
-	 */
         kthread_stop(cache->flush_thread);
  	free_flush_buffer(cache);
- 	/* Destroy in-core structures */
         destroy_cache_policy(cache);
  	free_segment_header_array(cache);
- }
+}

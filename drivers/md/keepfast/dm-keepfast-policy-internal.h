@@ -78,9 +78,9 @@ static inline int policy_writeback_work(struct policy_operation *pop,
 	return pop->writeback_work ? pop->writeback_work(pop, cblock) : -ENOENT;
 }
 
-static inline void policy_insert_mapping(struct policy_operation *pop, dm_oblock_t oblock, struct cache_entry *centry)
+static inline int policy_insert_mapping(struct policy_operation *pop, dm_oblock_t oblock, struct cache_entry *centry)
 {
-	pop->insert_mapping(pop, oblock, centry);
+	return pop->insert_mapping(pop, oblock, centry);
 }
 
 static inline void policy_remove_mapping(struct policy_operation *pop, struct cache_entry *centry)
